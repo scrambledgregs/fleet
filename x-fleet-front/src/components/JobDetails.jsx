@@ -2,7 +2,18 @@ import { useEffect, useState } from 'react'
 import { Phone, Mail, MapPin, Tag, Building2 } from 'lucide-react'
 import { API_BASE } from '../config'
 
-function Row({label, children}){
+// ---- helper ----
+function addrToString(a) {
+  if (!a) return ''
+  if (typeof a === 'string') return a
+  const parts = [
+    a.fullAddress,
+    [a.address, a.city, a.state, a.postalCode].filter(Boolean).join(', ')
+  ].filter(Boolean)
+  return parts[0] || ''
+}
+
+function Row({ label, children }) {
   return (
     <div className="flex items-start gap-2 text-sm">
       <div className="min-w-24 text-white/60">{label}</div>
@@ -11,11 +22,11 @@ function Row({label, children}){
   )
 }
 
-function CopyBtn({text}){
+function CopyBtn({ text }) {
   const [copied, setCopied] = useState(false)
   return (
     <button
-      onClick={() => { navigator.clipboard.writeText(text||''); setCopied(true); setTimeout(()=>setCopied(false), 1000) }}
+      onClick={() => { navigator.clipboard.writeText(text || ''); setCopied(true); setTimeout(() => setCopied(false), 1000) }}
       className="px-1.5 py-1 text-[11px] rounded-none glass hover:bg-panel/70 transition ml-2"
     >
       {copied ? 'Copied' : 'Copy'}
@@ -23,7 +34,7 @@ function CopyBtn({text}){
   )
 }
 
-export default function JobDetails({ jobId, seed, onClose }){
+export default function JobDetails({ jobId, seed, onClose }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
 
@@ -37,14 +48,22 @@ export default function JobDetails({ jobId, seed, onClose }){
       } catch (e) {
         setData({
           appointmentId: jobId,
-          address: seed?.address,
-          lat: seed?.lat, lng: seed?.lng,
+          address: seed?.address, // job/service address
+          lat: seed?.lat,
+          lng: seed?.lng,
           startTime: new Date().toISOString(),
-          endTime: new Date(Date.now()+3600000).toISOString(),
-          jobType: seed?.jobType, estValue: seed?.estValue, territory: seed?.territory,
+          endTime: new Date(Date.now() + 3600000).toISOString(),
+          jobType: seed?.jobType,
+          estValue: seed?.estValue,
+          territory: seed?.territory,
           contact: seed?.contact || {
             name: '—',
-            emails: [], phones: [], address: seed?.address, tags: [], custom: {}, pipeline: null
+            emails: [],
+            phones: [],
+            address: null, // leave contact address empty unless you actually have it
+            tags: [],
+            custom: {},
+            pipeline: null
           }
         })
       } finally {
@@ -57,6 +76,9 @@ export default function JobDetails({ jobId, seed, onClose }){
   if (!data) return <div className="p-4 text-sm text-white/60">Not found.</div>
 
   const c = data.contact || {}
+  const jobAddr = addrToString(data.address)
+  const contactAddr = addrToString(c.address)
+  const showBoth = jobAddr && contactAddr && jobAddr !== contactAddr
 
   return (
     <div className="fixed inset-0 z-[500] flex">
@@ -85,7 +107,7 @@ export default function JobDetails({ jobId, seed, onClose }){
             <div className="mt-3 space-y-2">
               <Row label="Phone">
                 <div className="flex items-center gap-2 flex-wrap">
-                  {(c.phones||[]).length ? c.phones.map((p,i)=>(
+                  {(c.phones || []).length ? c.phones.map((p, i) => (
                     <div key={i} className="flex items-center gap-2">
                       <a href={`tel:${p}`} className="text-white/90 hover:underline flex items-center gap-1"><Phone size={14}/>{p}</a>
                     </div>
@@ -95,7 +117,7 @@ export default function JobDetails({ jobId, seed, onClose }){
 
               <Row label="Email">
                 <div className="flex items-center gap-2 flex-wrap">
-                  {(c.emails||[]).length ? c.emails.map((e,i)=>(
+                  {(c.emails || []).length ? c.emails.map((e, i) => (
                     <div key={i} className="flex items-center gap-2">
                       <a href={`mailto:${e}`} className="text-white/90 hover:underline flex items-center gap-1"><Mail size={14}/>{e}</a>
                     </div>
@@ -104,23 +126,32 @@ export default function JobDetails({ jobId, seed, onClose }){
               </Row>
 
               <Row label="Address">
-                <div className="flex items-center flex-wrap gap-2">
-                  <div className="flex items-center gap-2"><MapPin size={14}/><span>{c.address || data.address || '—'}</span></div>
+                <div className="flex flex-col gap-1">
+                  <div className="flex items-center gap-2">
+                    <MapPin size={14}/>
+                    <span>{jobAddr || '—'}</span>
+                  </div>
+
+                  {showBoth && (
+                    <div className="pl-6 text-xs text-white/70">
+                      Contact Address: {contactAddr}
+                    </div>
+                  )}
                 </div>
               </Row>
 
-              {(c.tags||[]).length > 0 && (
+              {(c.tags || []).length > 0 && (
                 <Row label="Tags">
                   <div className="flex items-center gap-1.5 flex-wrap">
-                    {c.tags.map((t,i)=>(<span key={i} className="px-1.5 py-0.5 rounded-none text-[11px] bg-white/10 flex items-center gap-1"><Tag size={12}/>{t}</span>))}
+                    {c.tags.map((t, i) => (<span key={i} className="px-1.5 py-0.5 rounded-none text-[11px] bg-white/10 flex items-center gap-1"><Tag size={12}/>{t}</span>))}
                   </div>
                 </Row>
               )}
 
-              {c.custom && Object.keys(c.custom).length>0 && (
+              {c.custom && Object.keys(c.custom).length > 0 && (
                 <Row label="Custom">
                   <div className="space-y-1 text-xs">
-                    {Object.entries(c.custom).map(([k,v]) => (<div key={k}><span className="text-white/60">{k}:</span> <span className="text-white/90">{String(v)}</span></div>))}
+                    {Object.entries(c.custom).map(([k, v]) => (<div key={k}><span className="text-white/60">{k}:</span> <span className="text-white/90">{String(v)}</span></div>))}
                   </div>
                 </Row>
               )}
@@ -136,7 +167,7 @@ export default function JobDetails({ jobId, seed, onClose }){
           <div className="glass rounded-none p-3">
             <div className="text-xs text-white/60">Job</div>
             <div className="mt-1 text-sm">Type: <span className="text-white/90">{data.jobType}</span></div>
-            <div className="mt-1 text-sm">Est. Value: <span className="text-white/90">${(data.estValue||0).toLocaleString()}</span></div>
+            <div className="mt-1 text-sm">Est. Value: <span className="text-white/90">${(data.estValue || 0).toLocaleString()}</span></div>
             <div className="mt-1 text-sm">Territory: <span className="text-white/90">{data.territory}</span></div>
             <div className="mt-1 text-sm">Window: <span className="text-white/90">{new Date(data.startTime).toLocaleString()} – {new Date(data.endTime).toLocaleTimeString()}</span></div>
           </div>
