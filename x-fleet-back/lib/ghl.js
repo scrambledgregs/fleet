@@ -1,22 +1,17 @@
 // lib/ghl.js
 import axios from 'axios';
 
-/**
- * Modes:
- * - API key (Subaccount/Location): use v1 base (rest.gohighlevel.com) — NO Version header
- * - OAuth access token (LeadConnector): use services base + Version header
- *
- * Toggle with:
- *   GHL_USE_SERVICES=true            // only if you're using an OAuth token
- * Optional:
- *   GHL_API_BASE=<override base>     // rarely needed
- *   GHL_API_VERSION=2021-07-28       // only relevant in services mode
- */
+/* -----------------------------
+   Calendar IDs (hard-coded RR)
+------------------------------*/
+export const ROUND_ROBIN_CALENDAR_ID = 'WHNbgItyx80Dn4w8nut1';
 
+/* -----------------------------------------
+   Axios clients (v1 vs services auto-pick)
+------------------------------------------*/
 const useServices = process.env.GHL_USE_SERVICES === 'true';
 
-// Primary client (auto-picks base/headers by mode)
-const GHL_PRIMARY = axios.create({
+export const GHL_PRIMARY = axios.create({
   baseURL:
     process.env.GHL_API_BASE ||
     (useServices ? 'https://services.leadconnectorhq.com' : 'https://rest.gohighlevel.com/v1'),
@@ -29,7 +24,6 @@ const GHL_PRIMARY = axios.create({
   timeout: 15000,
 });
 
-// Fallback v1 client (used when services returns 401 Invalid JWT with an API key)
 const GHL_V1 = axios.create({
   baseURL: 'https://rest.gohighlevel.com/v1',
   headers: {
@@ -40,10 +34,42 @@ const GHL_V1 = axios.create({
   timeout: 15000,
 });
 
-// -----------------------------
-// Contact helpers
-// -----------------------------
+/* ----------------------------------------------------
+   Time helper: UTC ISO -> "YYYY-MM-DDTHH:mm:ss-04:00"
+   (DST-aware for a given IANA timezone)
+-----------------------------------------------------*/
+function toISOWithTZOffset(utcISO, timeZone = 'America/New_York') {
+  const d = new Date(utcISO);
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+  const parts = Object.fromEntries(fmt.formatToParts(d).map(p => [p.type, p.value]));
+  const y = +parts.year, m = +parts.month, day = +parts.day;
+  const hh = +parts.hour, mm = +parts.minute, ss = +parts.second;
 
+  // Offset detection
+  const wallAsUTC = Date.UTC(y, m - 1, day, hh, mm, ss);
+  const offsetMs = wallAsUTC - d.getTime();
+  const sign = offsetMs >= 0 ? '+' : '-';
+  const abs = Math.abs(offsetMs);
+  const offH = String(Math.floor(abs / 3_600_000)).padStart(2, '0');
+  const offM = String(Math.floor((abs % 3_600_000) / 60_000)).padStart(2, '0');
+
+  return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(day).padStart(2, '0')}T` +
+         `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}` +
+         `${sign}${offH}:${offM}`;
+}
+
+/* -----------------------------
+   Contact helpers / normalizer
+------------------------------*/
 function toContactAddressString(a = {}) {
   if (typeof a === 'string') return a;
   const parts = [
@@ -55,37 +81,58 @@ function toContactAddressString(a = {}) {
   return parts[0] || '';
 }
 
-// Normalize GHL -> UI shape
+export async function createContact({ firstName, lastName = '', email = '', phone }) {
+  try {
+    const url = `https://rest.gohighlevel.com/v1/contacts/`;
+    const payload = { firstName, lastName, email: email || '', phone };
+    const { data } = await axios.post(url, payload, {
+      headers: { Authorization: `Bearer ${process.env.GHL_API_KEY}`, 'Content-Type': 'application/json' },
+    });
+    return data?.contact ? data.contact : data; // ensure object with .id
+  } catch (err) {
+    console.error('[GHL createContact error]', err?.response?.data || err.message);
+    throw err;
+  }
+}
+
 export function normalizeContact(raw = {}, fallbacks = {}) {
   const first = raw.firstName || raw.first_name || fallbacks.firstName || '';
-  const last  = raw.lastName  || raw.last_name  || fallbacks.lastName  || '';
-  const name  = raw.name || [first, last].filter(Boolean).join(' ').trim() || fallbacks.name || '';
+  const last = raw.lastName || raw.last_name || fallbacks.lastName || '';
+  const name = raw.name || [first, last].filter(Boolean).join(' ').trim() || fallbacks.name || '';
 
   const emails = Array.from(
-    new Set([].concat(raw.email || [], raw.emails || [], fallbacks.email || [], fallbacks.emails || []).filter(Boolean))
+    new Set(
+      []
+        .concat(raw.email || [], raw.emails || [], fallbacks.email || [], fallbacks.emails || [])
+        .filter(Boolean),
+    ),
   );
 
   const phones = Array.from(
-    new Set([].concat(raw.phone || [], raw.phones || [], fallbacks.phone || [], fallbacks.phones || []).filter(Boolean))
+    new Set(
+      []
+        .concat(raw.phone || [], raw.phones || [], fallbacks.phone || [], fallbacks.phones || [])
+        .filter(Boolean),
+    ),
   );
 
   const addrObj = {
     fullAddress: raw.fullAddress || raw.full_address,
-    address1:    raw.address1 || raw.address,
-    city:        raw.city,
-    state:       raw.state,
-    postalCode:  raw.postalCode || raw.postal_code || raw.zip,
+    address1: raw.address1 || raw.address,
+    city: raw.city,
+    state: raw.state,
+    postalCode: raw.postalCode || raw.postal_code || raw.zip,
   };
 
   return {
     id: raw.id || fallbacks.id || null,
     name,
     firstName: first || undefined,
-    lastName:  last  || undefined,
+    lastName: last || undefined,
     company: raw.company || raw.companyName || fallbacks.company || undefined,
     emails,
     phones,
-    address: toContactAddressString(addrObj), // CONTACT profile address (job/service address is separate)
+    address: toContactAddressString(addrObj),
     tags: raw.tags || fallbacks.tags || [],
     custom: fallbacks.custom || {},
     pipeline: fallbacks.pipeline || null,
@@ -97,8 +144,9 @@ async function getContactById(client, id) {
   return data?.contact || data?.data || data;
 }
 
-export async function getContact(contactId, { email, phone } = {}) {
-  // 1) Try primary client first
+export async function getContact(contactId, searchParams = {}) {
+  const { email, phone } = searchParams || {};
+  // 1) Try by ID on primary
   try {
     if (contactId) {
       const payload = await getContactById(GHL_PRIMARY, contactId);
@@ -107,8 +155,7 @@ export async function getContact(contactId, { email, phone } = {}) {
   } catch (e) {
     const status = e?.response?.status;
     console.warn('[GHL] contacts/{id} primary failed:', status, e?.message);
-
-    // If we're in services mode but actually using an API key, 401 Invalid JWT → fall back to v1
+    // If misconfigured services+API key → fallback to v1
     if (useServices && status === 401 && contactId) {
       try {
         const payload = await getContactById(GHL_V1, contactId);
@@ -119,8 +166,7 @@ export async function getContact(contactId, { email, phone } = {}) {
     }
   }
 
-  // 2) Search by email/phone (works on v1; many tenants also support on services)
-  // Try primary first; if it errors, try v1.
+  // 2) Search by email
   if (email) {
     try {
       const { data } = await GHL_PRIMARY.get(`/contacts/search?email=${encodeURIComponent(email)}`);
@@ -135,6 +181,7 @@ export async function getContact(contactId, { email, phone } = {}) {
     }
   }
 
+  // 3) Search by phone
   if (phone) {
     try {
       const { data } = await GHL_PRIMARY.get(`/contacts/search?phone=${encodeURIComponent(phone)}`);
@@ -149,13 +196,92 @@ export async function getContact(contactId, { email, phone } = {}) {
     }
   }
 
-  // 3) Minimal fallback
+  // 4) Minimal fallback
   return normalizeContact({}, { id: contactId || null, email, phone });
 }
 
-// -----------------------------
-// Appointment updates (stubs)
-// -----------------------------
-export async function updateAppointmentOwner(appointmentId, repUserId) { return { ok: true }; }
-export async function rescheduleAppointment(appointmentId, startISO, endISO) { return { ok: true }; }
-export async function appendAppointmentNotes(appointmentId, text) { return { ok: true }; }
+/* -----------------------------
+   Custom field updates
+------------------------------*/
+export async function updateContactCustomFields(contactId, kv = {}) {
+  if (!contactId) throw new Error('contactId required');
+  const pairs = Object.entries(kv).map(([id, value]) => ({ id, value }));
+
+  try {
+    await GHL_PRIMARY.put(`/contacts/${encodeURIComponent(contactId)}`, { customFields: pairs });
+    return { ok: true };
+  } catch (e) {
+    const status = e?.response?.status;
+    const msg = e?.response?.data || e?.message;
+    if (useServices && status === 401) {
+      try {
+        await GHL_V1.put(`/contacts/${encodeURIComponent(contactId)}`, { customFields: pairs });
+        return { ok: true, via: 'v1-fallback' };
+      } catch (e2) {
+        throw new Error(`[GHL v1 fallback] ${e2?.response?.status || ''} ${e2?.message || e2}`);
+      }
+    }
+    throw new Error(`[GHL primary] ${status || ''} ${msg}`);
+  }
+}
+
+/* -----------------------------
+   Appointment updates (stubs)
+------------------------------*/
+export async function updateAppointmentOwner(_appointmentId, _repUserId) { return { ok: true }; }
+export async function rescheduleAppointment(_appointmentId, _startISO, _endISO) { return { ok: true }; }
+export async function appendAppointmentNotes(_appointmentId, _text) { return { ok: true }; }
+
+/* ------------------------------------------------
+   Availability (v1): GET /calendars/{id}/availability
+-------------------------------------------------*/
+export async function getCalendarAvailability(calendarId, date /* YYYY-MM-DD */) {
+  if (!calendarId) throw new Error('calendarId required');
+  if (!date) throw new Error('date (YYYY-MM-DD) required');
+
+  try {
+    const { data } = await GHL_PRIMARY.get(
+      `/calendars/${encodeURIComponent(calendarId)}/availability`,
+      { params: { date } },
+    );
+    return data; // typically { availability: [ "2025-08-19T10:00:00-04:00", ... ] }
+  } catch (e) {
+    console.error('[availability error]', e?.response?.status, e?.response?.data || e.message);
+    throw e;
+  }
+}
+
+/* ----------------------------------------------------------
+   Appointment creation (v1 round-robin, NOT personal calendar)
+   Payload must include selectedSlot + selectedTimezone
+-----------------------------------------------------------*/
+export async function createAppointment({
+  contactId,
+  selectedSlot,        // "YYYY-MM-DDTHH:mm:ss-04:00" (ideally from availability API)
+  selectedTimezone,    // "America/New_York"
+  startTime,           // optional UTC fallback → converted to selectedSlot
+  timezone = 'America/New_York',
+}) {
+  if (!contactId) throw new Error('Missing contactId');
+
+  const calendarId = ROUND_ROBIN_CALENDAR_ID; // fixed RR calendar
+  const slot = selectedSlot ?? toISOWithTZOffset(startTime, timezone);
+  const tz = selectedTimezone ?? timezone;
+
+  const payload = {
+    calendarId,
+    contactId,
+    selectedSlot: slot,
+    selectedTimezone: tz,
+  };
+
+  console.log('[DEBUG v1 rr payload]', payload);
+
+  try {
+    const { data } = await GHL_PRIMARY.post('/appointments/', payload);
+    return data;
+  } catch (e) {
+    console.error('[createAppointment primary error]', e?.response?.status, e?.response?.data || e.message);
+    throw e;
+  }
+}

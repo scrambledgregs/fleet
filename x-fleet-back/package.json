@@ -8,10 +8,12 @@
     "start": "NODE_ENV=production node server.js"
   },
   "dependencies": {
-    "axios": "^1.7.2",
+    "axios": "^1.11.0",
     "cors": "^2.8.5",
+    "date-fns-tz": "^3.2.0",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "node-fetch": "^3.3.2",
     "socket.io": "^4.7.5"
   }
 }
