@@ -202,8 +202,17 @@ export default function RequestAppointment() {
       {confirmed && (
         <div>
           <h3>✅ Appointment Confirmed!</h3>
-          <p>We’ve booked your appointment for {new Date(selectedTime.start).toLocaleString()}.</p>
-        </div>
+<p>
+  We’ve booked your appointment for{" "}
+  {new Date(selectedTime.start).toLocaleString("en-US", {
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  })}
+</p>        </div>
       )}
     </div>
   );

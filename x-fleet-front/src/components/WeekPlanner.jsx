@@ -23,7 +23,17 @@ export default function WeekPlanner(){
         const r = await fetch(`${API_BASE}/api/week-appointments`)
         if (!r.ok) throw new Error('no api')
         const data = await r.json()
-        setItems(data || fallbackWeek)
+const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
+const normalized = (data || []).map(j => {
+  const d = new Date(j.startTime || Date.now())
+  return {
+    ...j,
+    day: j.day || d.toLocaleDateString(undefined, { weekday: 'short', timeZone: tz }),
+    time: j.time || d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', timeZone: tz }),
+    dateText: j.dateText || d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: tz }),
+  }
+})
+setItems(normalized.length ? normalized : fallbackWeek)
       } catch(e){
         setItems(fallbackWeek)
       } finally {
@@ -111,7 +121,12 @@ export default function WeekPlanner(){
         <div key={day} className="glass rounded-none p-3">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2">
-              <CalendarDays size={16} className="text-white/70"/><div className="font-semibold">{day}</div>
+<CalendarDays size={16} className="text-white/70"/>
+<div className="font-semibold">
+  {day}
+  <span className="text-white/60 ml-2">• {groups[day][0]?.dateText}</span>
+  </div>
+
             </div>
             <div className="text-xs text-white/60">{groups[day].length} appt(s)</div>
           </div>

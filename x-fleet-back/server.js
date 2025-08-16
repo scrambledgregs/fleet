@@ -103,9 +103,21 @@ function dayBoundsEpochMs(yyyyMmDd, tzOffset = TZ_OFFSET_FALLBACK) {
 }
 function ensureOffsetISO(iso, fallbackOffset = TZ_OFFSET_FALLBACK) {
   if (!iso) return iso;
-  // If the client sent UTC (ends with 'Z'), replace with our fallback offset and strip millis
-  if (iso.endsWith('Z')) return iso.replace('Z', fallbackOffset).replace(/\.\d{3}/, '');
-  return iso;
+
+  // If timestamp already has a timezone (Z or ±HH:MM), leave it alone.
+  if (/[+-]\d\d:\d\d$|Z$/.test(iso)) {
+    return iso.replace(/\.\d{3}/, ''); // optional: strip millis for cleanliness
+  }
+
+  // Otherwise, append a fallback offset (rare—mostly for naive strings).
+  return `${iso.replace(/\.\d{3}/, '')}${fallbackOffset}`;
+}
+function normalizePhone(p) {
+  if (!p) return p;
+  let s = String(p).replace(/[^\d]/g, '');
+  if (s.length === 10) s = '1' + s;     // assume US if 10 digits
+  if (!s.startsWith('+')) s = '+' + s;
+  return s;
 }
 
 app.get('/api/test-geocode', async (req, res) => {
@@ -127,27 +139,42 @@ app.post('/api/clear-jobs', (req, res) => {
   res.json({ ok: true, message: `Jobs cleared for ${clientId}` })
 })
 
-app.get('/api/week-appointments', (req,res) => {
+app.get('/api/week-appointments', (req, res) => {
   const clientId = req.query.clientId || 'default';
   const jobs = jobsByClient.get(clientId) || new Map();
+
   const list = Array.from(jobs.values()).map(j => {
-    let day = j.day, time = j.time
+    const d = j.startTime ? new Date(j.startTime) : new Date();
+    let day = j.day, time = j.time;
+
     if (!day || !time) {
-      const d = new Date(j.startTime)
-      day = d.toLocaleDateString(undefined, { weekday: 'short' })
-      time = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+      day  = d.toLocaleDateString(undefined, { weekday: 'short' });
+      time = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
     }
+
+    const dateText = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); // 👈 add this
+
     return {
       id: j.appointmentId,
-      day, time,
+      // helpful for the UI:
+      startTime: d.toISOString(),  // 👈 lets you sort client-side if needed
+      day,
+      time,
+      dateText,                    // 👈 show “Aug 27” (or your locale) on the card
       address: toAddressString(j.address),
       lat: j.lat, lng: j.lng,
-      jobType: j.jobType, estValue: j.estValue, territory: j.territory,
-      contact: j.contact
-    }
+      jobType: j.jobType,
+      estValue: j.estValue,
+      territory: j.territory,
+      contact: j.contact,
+    };
   })
-  res.json(list)
-})
+  // optional: sort by start time so the list is ordered
+  .sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
+
+  res.json(list);
+});
+
 // add in server.js
 app.get('/api/debug/calendar', async (req, res) => {
   try {
@@ -276,14 +303,14 @@ app.get('/api/availability', async (req, res) => {
 
 // ---- Book appointment and push to GHL ----
 // ---- Book appointment and push to GHL ----
+// ---- Book appointment and push to GHL ----
 async function handleBookAppointment(req, res) {
   try {
     console.log("[DEBUG] Incoming create-appointment payload:", req.body);
 
-    // 1) destructure request
     const {
-      contact,                // { name, phone, email }  (optional if contactId provided)
-      contactId: contactIdFromClient,   // 👈 allow direct contactId pass-through
+      contact,                       // { name, phone, email } (optional if contactId provided)
+      contactId: contactIdFromClient,
       address,
       lat,
       lng,
@@ -295,44 +322,53 @@ async function handleBookAppointment(req, res) {
       timezone = 'America/New_York',
       title = 'Service appointment',
       notes = 'Booked by Dispatch Board',
-      rrule,                  // optional recurring rule
-      assignedUserId,         // optional override; else we’ll use env
-      clientId
+      rrule,
+      assignedUserId,
+      clientId,
     } = req.body;
 
-    // 2) quick validation for the bare minimum
     if (!address || !startTime) {
       return res.status(400).json({
         ok: false,
-        error: 'Missing required fields: address, startTime (and either contactId OR contact{name,phone})'
+        error: 'Missing required fields: address, startTime (and either contactId OR contact{name,phone})',
       });
     }
 
-    // 3) resolve a contactId:
-    //    - if caller provided contactId, use it (skips contact creation)
-    //    - else, find or create using contact info
+    // Resolve contactId
     let contactId = contactIdFromClient || null;
 
     if (!contactId) {
       if (!contact || !contact.name || !contact.phone) {
         return res.status(400).json({
           ok: false,
-          error: 'Missing contact info: contact{name,phone} is required when contactId is not provided'
+          error: 'Missing contact info: contact{name,phone} is required when contactId is not provided',
         });
       }
 
-      // try to find
-      const existing = await getContact(null, { email: contact.email, phone: contact.phone });
+      const emailNorm = (contact?.email || '').trim().toLowerCase();
+      const phoneNorm = normalizePhone(contact?.phone);
+
+      const existing = await getContact(null, { email: emailNorm, phone: phoneNorm });
       if (existing?.id) {
         contactId = existing.id;
       } else {
-        // create
-        const created = await createContact({
-          firstName: contact.name,
-          email: contact.email || '',
-          phone: contact.phone
-        });
-        contactId = created?.id || created?.contact?.id || null;
+        try {
+          const created = await createContact({
+            firstName: contact.name,
+            email: emailNorm,
+            phone: phoneNorm,
+          });
+          contactId = created?.id || created?.contact?.id || null;
+        } catch (e) {
+          const dupId = e?.response?.data?.meta?.contactId;
+          const msg = e?.response?.data?.message || '';
+          if (dupId && /duplicated contacts/i.test(msg)) {
+            console.warn('[Contact] Duplicate detected; using existing contactId:', dupId);
+            contactId = dupId;
+          } else {
+            throw e;
+          }
+        }
       }
     }
 
@@ -340,12 +376,13 @@ async function handleBookAppointment(req, res) {
       return res.status(500).json({ ok: false, error: 'No contactId returned/resolved in GHL' });
     }
 
-    // 4) normalize times (keep your existing ensureOffsetISO if desired)
+    // Times
     const startISO = ensureOffsetISO(startTime);
-    const endISO   = endTime ? ensureOffsetISO(endTime)
-                             : new Date(new Date(startISO).getTime() + 60 * 60 * 1000).toISOString();
+    const endISO = endTime
+      ? ensureOffsetISO(endTime)
+      : new Date(new Date(startISO).getTime() + 60 * 60 * 1000).toISOString();
 
-    // 5) create the appointment (this matches your working curl)
+    // Create appointment
     const created = await createAppointmentV2({
       calendarId: process.env.GHL_CALENDAR_ID,
       contactId,
@@ -355,11 +392,11 @@ async function handleBookAppointment(req, res) {
       title,
       notes,
       address,
-      rrule,                               // optional, only sent if provided
+      rrule,
       assignedUserId: assignedUserId || process.env.GHL_USER_ID,
     });
 
-    // 6) save to in-memory board
+    // Store job locally
     const activeClientId = clientId || 'default';
     if (!jobsByClient.has(activeClientId)) jobsByClient.set(activeClientId, new Map());
     const jobs = jobsByClient.get(activeClientId);

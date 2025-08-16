@@ -24,6 +24,7 @@ function Row({ label, children }) {
 
 function CopyBtn({ text }) {
   const [copied, setCopied] = useState(false)
+  
   return (
     <button
       onClick={() => { navigator.clipboard.writeText(text || ''); setCopied(true); setTimeout(() => setCopied(false), 1000) }}
@@ -39,38 +40,50 @@ export default function JobDetails({ jobId, seed, onClose }) {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    (async () => {
-      try {
-        const r = await fetch(`${API_BASE}/api/job/${encodeURIComponent(jobId)}`)
-        if (!r.ok) throw new Error('no job')
-        const d = await r.json()
-        setData(d)
-      } catch (e) {
-        setData({
-          appointmentId: jobId,
-          address: seed?.address, // job/service address
-          lat: seed?.lat,
-          lng: seed?.lng,
-          startTime: new Date().toISOString(),
-          endTime: new Date(Date.now() + 3600000).toISOString(),
-          jobType: seed?.jobType,
-          estValue: seed?.estValue,
-          territory: seed?.territory,
-          contact: seed?.contact || {
-            name: '—',
-            emails: [],
-            phones: [],
-            address: null, // leave contact address empty unless you actually have it
-            tags: [],
-            custom: {},
-            pipeline: null
-          }
-        })
-      } finally {
-        setLoading(false)
-      }
-    })()
-  }, [jobId])
+  (async () => {
+    try {
+      const r = await fetch(`${API_BASE}/api/job/${encodeURIComponent(jobId)}`);
+      if (!r.ok) throw new Error('no job');
+
+      const d = await r.json();
+
+      // ✅ Merge: prefer API values, but fall back to seed, then to “now”
+      setData({
+        ...seed,
+        ...d,
+        startTime: d.startTime || seed?.startTime || new Date().toISOString(),
+        endTime:
+          d.endTime ||
+          seed?.endTime ||
+          new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      });
+    } catch (e) {
+      // ✅ Fallback: use seed times instead of “now”
+      setData({
+        appointmentId: jobId,
+        address: seed?.address,
+        lat: seed?.lat,
+        lng: seed?.lng,
+        startTime: seed?.startTime || new Date().toISOString(),
+        endTime: seed?.endTime || new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        jobType: seed?.jobType,
+        estValue: seed?.estValue,
+        territory: seed?.territory,
+        contact: seed?.contact || {
+          name: '—',
+          emails: [],
+          phones: [],
+          address: null,
+          tags: [],
+          custom: {},
+          pipeline: null,
+        },
+      });
+    } finally {
+      setLoading(false);
+    }
+  })();
+}, [jobId, seed]);
 
   if (loading) return <div className="p-4 text-sm text-white/60">Loading…</div>
   if (!data) return <div className="p-4 text-sm text-white/60">Not found.</div>
@@ -79,7 +92,19 @@ export default function JobDetails({ jobId, seed, onClose }) {
   const jobAddr = addrToString(data.address)
   const contactAddr = addrToString(c.address)
   const showBoth = jobAddr && contactAddr && jobAddr !== contactAddr
+ const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+const dStart = data?.startTime ? new Date(data.startTime) : new Date();
+const dEnd   = data?.endTime   ? new Date(data.endTime)   : new Date(dStart.getTime() + 60*60*1000);
 
+  const dateStr  = dStart.toLocaleDateString(undefined, {
+    weekday: 'short', month: 'short', day: 'numeric', timeZone: tz,
+  });
+  const startStr = dStart.toLocaleTimeString(undefined, {
+    hour: 'numeric', minute: '2-digit', timeZone: tz,
+  });
+  const endStr   = dEnd.toLocaleTimeString(undefined, {
+    hour: 'numeric', minute: '2-digit', timeZone: tz,
+  });
   return (
     <div className="fixed inset-0 z-[500] flex">
       <div className="absolute inset-0 bg-black/60" onClick={onClose}></div>
@@ -169,8 +194,9 @@ export default function JobDetails({ jobId, seed, onClose }) {
             <div className="mt-1 text-sm">Type: <span className="text-white/90">{data.jobType}</span></div>
             <div className="mt-1 text-sm">Est. Value: <span className="text-white/90">${(data.estValue || 0).toLocaleString()}</span></div>
             <div className="mt-1 text-sm">Territory: <span className="text-white/90">{data.territory}</span></div>
-            <div className="mt-1 text-sm">Window: <span className="text-white/90">{new Date(data.startTime).toLocaleString()} – {new Date(data.endTime).toLocaleTimeString()}</span></div>
-          </div>
+<div className="mt-1 text-sm">
+  Window: <span className="text-white/90">{dateStr}, {startStr} – {endStr}</span>
+</div>          </div>
         </div>
       </aside>
     </div>

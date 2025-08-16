@@ -97,16 +97,31 @@ export function normalizeContact(raw = {}, fallbacks = {}) {
    Contacts (v2, Services host)
    ================================ */
 
-// Create a contact (Contacts endpoints use a different Version)
-export async function createContact({ firstName, lastName = '', email = '', phone }) {
-  const payload = { firstName, lastName, email: email || '', phone };
+// Create a contact (Contacts API)
+export async function createContact({
+  firstName,
+  lastName = '',
+  email = '',
+  phone,
+  locationId = process.env.GHL_LOCATION_ID,
+}) {
+  const payload = {
+    firstName,
+    lastName,
+    name: [firstName, lastName].filter(Boolean).join(' '),
+    email,
+    phone,
+    locationId,           // ✅ belongs in the body, not headers
+    source: 'public api', // optional, good practice
+  };
+
   const { data } = await GHL_PRIMARY.post('/contacts/', payload, {
-      headers: {
-      Version: '2021-07-28',                 // Contacts API version
-      LocationId: process.env.GHL_LOCATION_ID,
-      'Location-Id': process.env.GHL_LOCATION_ID,
+    headers: {
+      Version: '2021-07-28',    // ✅ correct for Contacts
+      Accept: 'application/json',
     },
   });
+
   return data?.contact || data?.data || data;
 }
 
