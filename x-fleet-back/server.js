@@ -5,7 +5,7 @@ import http from 'http';
 import { Server as SocketIOServer } from 'socket.io';
 import cors from 'cors';
 import fetch from 'node-fetch';
-
+import axios from 'axios'; 
 import { scoreAllReps } from './lib/fit.js';
 
 import {
@@ -15,7 +15,7 @@ import {
   rescheduleAppointment,
   appendAppointmentNotes,
   updateContactCustomFields,
-  createAppointment,
+  createAppointmentV2,
 } from './lib/ghl.js';
 
 
@@ -24,12 +24,6 @@ const server = http.createServer(app)
 const io = new SocketIOServer(server, {
   cors: { origin: process.env.ALLOW_ORIGIN || '*', methods: ['GET','POST'] }
 })
-
-function toOffsetISO(isoZ, offset = '-04:00') {
-  // If you know you're in EDT right now, use -04:00.
-  // In winter switch to -05:00 or compute dynamically with a tz lib.
-  return isoZ.replace('Z', offset).replace(/\.\d{3}/, ''); // strip millis if present
-}
 
 async function geocodeAddress(address) {
   if (!address) return null;
@@ -61,6 +55,58 @@ app.use((req, _res, next) => {
   }
   next()
 })
+
+// helper: very simple offset fallback (see NOTE)
+const TZ_DEFAULT = 'America/New_York';
+const TZ_OFFSET_FALLBACK = process.env.DEFAULT_TZ_OFFSET || '-04:00'; // EDT default
+
+function extractSlotsFromGHL(data) {
+  // Accept several shapes:
+  // 1) { timeSlots: [...] } or { availableSlots: [...] } or { slots: [...] }
+  // 2) { "YYYY-MM-DD": { slots: [...] }, ... }
+  let raw = data?.timeSlots || data?.availableSlots || data?.slots;
+
+  if (!raw) {
+    // try date-keyed format: pick the first date that has slots[]
+    const dateKey = Object.keys(data || {}).find(k => /^\d{4}-\d{2}-\d{2}$/.test(k) && data[k]?.slots);
+    if (dateKey) raw = data[dateKey].slots;
+  }
+
+  if (!raw) return [];
+
+  // Normalize to [{start,end}] (strings may be 30-min; we’ll assume 60m default end if missing)
+  const slots = raw
+    .map(s => {
+      if (typeof s === 'string') {
+        const start = new Date(s);
+        const end = new Date(start.getTime() + 60 * 60 * 1000);
+        return { start: start.toISOString(), end: end.toISOString() };
+      }
+      if (s?.start && s?.end) {
+        return { start: new Date(s.start).toISOString(), end: new Date(s.end).toISOString() };
+      }
+      return null;
+    })
+    .filter(Boolean);
+
+  return slots;
+}
+
+function dayBoundsEpochMs(yyyyMmDd, tzOffset = TZ_OFFSET_FALLBACK) {
+  // Build "YYYY-MM-DDT00:00:00-04:00" and "...23:59:59-04:00" and take .getTime()
+  const startISO = `${yyyyMmDd}T00:00:00${tzOffset}`;
+  const endISO   = `${yyyyMmDd}T23:59:59${tzOffset}`;
+  return {
+    startMs: new Date(startISO).getTime(),
+    endMs:   new Date(endISO).getTime(),
+  };
+}
+function ensureOffsetISO(iso, fallbackOffset = TZ_OFFSET_FALLBACK) {
+  if (!iso) return iso;
+  // If the client sent UTC (ends with 'Z'), replace with our fallback offset and strip millis
+  if (iso.endsWith('Z')) return iso.replace('Z', fallbackOffset).replace(/\.\d{3}/, '');
+  return iso;
+}
 
 app.get('/api/test-geocode', async (req, res) => {
   try {
@@ -102,11 +148,40 @@ app.get('/api/week-appointments', (req,res) => {
   })
   res.json(list)
 })
+// add in server.js
+app.get('/api/debug/calendar', async (req, res) => {
+  try {
+    const calId = process.env.GHL_CALENDAR_ID;
+    const base = process.env.GHL_API_BASE || 'https://services.leadconnectorhq.com';
+    const url = `${base}/calendars/${encodeURIComponent(calId)}`;
+    const r = await axios.get(url, {
+      headers: {
+        Authorization: `Bearer ${process.env.GHL_ACCESS_TOKEN}`,
+        Accept: 'application/json',
+        Version: '2021-07-28',
+        // include both variants just in case
+        LocationId: process.env.GHL_LOCATION_ID,
+        'Location-Id': process.env.GHL_LOCATION_ID,
+      },
+      timeout: 15000,
+    });
+    res.json({ ok: true, calendarId: calId, meta: r.data });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.response?.data || e?.message });
+  }
+});
 
 // REPLACE the entire /api/suggest-times route with this:
 app.post('/api/suggest-times', async (req, res) => {
   try {
-    const { date, timezone = 'America/New_York', address, jobType = 'Repair', estValue = 0, territory = 'EAST' } = req.body;
+    const {
+      date,                                    // YYYY-MM-DD
+      timezone = TZ_DEFAULT,
+      address,
+      jobType = 'Repair',
+      estValue = 0,
+      territory = 'EAST',
+    } = req.body;
 
     if (!date) {
       return res.status(400).json({ ok: false, error: 'date (YYYY-MM-DD) is required' });
@@ -116,93 +191,99 @@ app.post('/api/suggest-times', async (req, res) => {
     if (!calendarId) {
       return res.status(500).json({ ok: false, error: 'GHL_CALENDAR_ID is not set in .env' });
     }
+    if (!process.env.GHL_ACCESS_TOKEN) {
+      return res.status(500).json({ ok: false, error: 'GHL_ACCESS_TOKEN is not set in .env' });
+    }
 
-    const url = `https://rest.gohighlevel.com/v1/calendars/${calendarId}/availability?date=${encodeURIComponent(date)}`;
-    const { data } = await axios.get(url, {
+    // Build v2 free-slots URL
+    const base = 'https://services.leadconnectorhq.com';
+    const free = new URL(`/calendars/${calendarId}/free-slots`, base);
+
+    // NOTE: for perfect accuracy across DST, compute real offset for `timezone`.
+    // This fallback uses a fixed offset (-04:00 by default).
+    const { startMs, endMs } = dayBoundsEpochMs(date, TZ_OFFSET_FALLBACK);
+
+    free.searchParams.set('startDate', String(startMs)); // epoch ms (string)
+    free.searchParams.set('endDate',   String(endMs));   // epoch ms (string)
+    free.searchParams.set('timezone',  timezone);
+
+    const { data } = await axios.get(free.toString(), {
       headers: {
-        Authorization: `Bearer ${process.env.GHL_API_KEY}`,
-        Accept: 'application/json'
-      }
+        Authorization: `Bearer ${process.env.GHL_ACCESS_TOKEN}`,
+        Version: '2021-04-15',
+        Accept: 'application/json',
+      },
+      timeout: 15000,
     });
 
-    // Log raw response once to see structure
-    console.log('[DEBUG availability raw]', JSON.stringify(data, null, 2));
+    console.log('[DEBUG free-slots raw]', JSON.stringify(data, null, 2));
 
-    // Safely map whatever the API returns into {start, end}
-    const slots = (data?.timeSlots || data?.availableSlots || data?.slots || [])
-      .map(s => {
-        // common shapes are either strings or objects with start/end
-        if (typeof s === 'string') {
-          // Some tenants return ISO-with-offset strings per slot length; treat each as 1 hour by default
-          const start = new Date(s);
-          const end = new Date(start.getTime() + 60 * 60 * 1000);
-          return { start: start.toISOString(), end: end.toISOString() };
-        }
-        if (s?.start && s?.end) {
-          return { start: new Date(s.start).toISOString(), end: new Date(s.end).toISOString() };
-        }
-        return null;
-      })
-      .filter(Boolean);
+    // map into {start, end} ISO strings the UI expects
+    const slots = extractSlotsFromGHL(data);
 
-    // Attach context your UI already expects
-    const suggestions = slots.map(x => ({
-      ...x,
-      tech: undefined,         // (optional) fill later when scoring reps
-      jobType,
-      estValue: Number(estValue) || 0,
-      territory,
-      address
-    }));
+const suggestions = slots.map(x => ({
+  ...x,
+  tech: undefined,
+  jobType,
+  estValue: Number(estValue) || 0,
+  territory,
+  address,
+}));
 
     return res.json({ ok: true, suggestions });
   } catch (err) {
     const payload = err?.response?.data || { message: err.message };
-    console.error('[suggest-times availability error]', payload);
-    // Bubble a clearer message to the UI
+    console.error('[suggest-times error]', payload);
     const msg = payload?.msg || payload?.message || 'Availability lookup failed';
     return res.status(500).json({ ok: false, error: msg });
   }
 });
 
-import axios from 'axios'; // <-- Add to the top if not already imported
-
-// Get live availability from GHL Calendar
+// v2 availability (free-slots)
 app.get('/api/availability', async (req, res) => {
   try {
-    const { calendarId, date } = req.query; // date format: YYYY-MM-DD
+    const calendarId = req.query.calendarId || process.env.GHL_CALENDAR_ID;
+    const date = req.query.date;
+    const timezone = req.query.timezone || TZ_DEFAULT;
 
-    if (!calendarId) {
-      return res.status(400).json({ ok: false, error: 'calendarId is required' });
-    }
-    if (!date) {
-      return res.status(400).json({ ok: false, error: 'date is required' });
-    }
+    if (!calendarId) return res.status(400).json({ ok: false, error: 'calendarId is required' });
+    if (!date) return res.status(400).json({ ok: false, error: 'date (YYYY-MM-DD) is required' });
 
-    const url = `https://rest.gohighlevel.com/v1/calendars/${calendarId}/availability?date=${date}`;
+    const { startMs, endMs } = dayBoundsEpochMs(String(date), TZ_OFFSET_FALLBACK);
 
-    const { data } = await axios.get(url, {
+    const base = 'https://services.leadconnectorhq.com';
+    const free = new URL(`/calendars/${calendarId}/free-slots`, base);
+    free.searchParams.set('startDate', String(startMs));
+    free.searchParams.set('endDate',   String(endMs));
+    free.searchParams.set('timezone',  String(timezone));
+
+    const { data } = await axios.get(free.toString(), {
       headers: {
-        Authorization: `Bearer ${process.env.GHL_API_KEY}`,
-        Accept: 'application/json'
-      }
+        Authorization: `Bearer ${process.env.GHL_ACCESS_TOKEN}`,
+        Version: '2021-04-15',
+        Accept: 'application/json',
+      },
+      timeout: 15000,
     });
 
-    res.json({ ok: true, ...data });
+    const slots = extractSlotsFromGHL(data);
+    return res.json({ ok: true, slots });
   } catch (err) {
-    console.error('[Availability Error]', err?.response?.data || err.message);
-    res.status(500).json({ ok: false, error: err?.response?.data || err.message });
+    console.error('[Availability v2 Error]', err?.response?.data || err.message);
+    return res.status(500).json({ ok: false, error: err?.response?.data || err.message });
   }
 });
 
 // ---- Book appointment and push to GHL ----
+// ---- Book appointment and push to GHL ----
 async function handleBookAppointment(req, res) {
-  
   try {
     console.log("[DEBUG] Incoming create-appointment payload:", req.body);
-     console.log("[DEBUG] Starting appointment creation process...");
+
+    // 1) destructure request
     const {
-      contact,
+      contact,                // { name, phone, email }  (optional if contactId provided)
+      contactId: contactIdFromClient,   // 👈 allow direct contactId pass-through
       address,
       lat,
       lng,
@@ -211,71 +292,89 @@ async function handleBookAppointment(req, res) {
       territory = 'EAST',
       startTime,
       endTime,
+      timezone = 'America/New_York',
+      title = 'Service appointment',
+      notes = 'Booked by Dispatch Board',
+      rrule,                  // optional recurring rule
+      assignedUserId,         // optional override; else we’ll use env
       clientId
     } = req.body;
 
-    console.log("[DEBUG] Destructured variables:", { contact, address, startTime, endTime });
-
-if (!contact || !contact.name || !contact.phone || !address || !startTime || !endTime) {      
-  return res.status(400).json({ 
-    ok: false, 
-       error: 'Missing required fields: contact (with name, phone), address, startTime, endTime' 
+    // 2) quick validation for the bare minimum
+    if (!address || !startTime) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Missing required fields: address, startTime (and either contactId OR contact{name,phone})'
       });
     }
 
-    console.log("[DEBUG] Validation passed, proceeding to contact lookup...");
+    // 3) resolve a contactId:
+    //    - if caller provided contactId, use it (skips contact creation)
+    //    - else, find or create using contact info
+    let contactId = contactIdFromClient || null;
 
+    if (!contactId) {
+      if (!contact || !contact.name || !contact.phone) {
+        return res.status(400).json({
+          ok: false,
+          error: 'Missing contact info: contact{name,phone} is required when contactId is not provided'
+        });
+      }
 
-    // ✅ Step 1 — Find or create the contact
-  let contactId;
-const existing = await getContact(null, { email: contact.email, phone: contact.phone });
+      // try to find
+      const existing = await getContact(null, { email: contact.email, phone: contact.phone });
+      if (existing?.id) {
+        contactId = existing.id;
+      } else {
+        // create
+        const created = await createContact({
+          firstName: contact.name,
+          email: contact.email || '',
+          phone: contact.phone
+        });
+        contactId = created?.id || created?.contact?.id || null;
+      }
+    }
 
-if (existing?.id) {
-  contactId = existing.id;
-} else {
-  const newContact = await createContact({
-    firstName: contact.name,          // or split first/last if you want
-    email: contact.email || '',
-    phone: contact.phone
-  });
-  contactId = newContact.id || newContact.contact?.id; // <- robust
-}
+    if (!contactId) {
+      return res.status(500).json({ ok: false, error: 'No contactId returned/resolved in GHL' });
+    }
 
-if (!contactId) {
-  return res.status(500).json({ ok: false, error: 'No contactId returned from GHL' });
-}
+    // 4) normalize times (keep your existing ensureOffsetISO if desired)
+    const startISO = ensureOffsetISO(startTime);
+    const endISO   = endTime ? ensureOffsetISO(endTime)
+                             : new Date(new Date(startISO).getTime() + 60 * 60 * 1000).toISOString();
 
+    // 5) create the appointment (this matches your working curl)
+    const created = await createAppointmentV2({
+      calendarId: process.env.GHL_CALENDAR_ID,
+      contactId,
+      startTime: startISO,
+      endTime: endISO,
+      timezone,
+      title,
+      notes,
+      address,
+      rrule,                               // optional, only sent if provided
+      assignedUserId: assignedUserId || process.env.GHL_USER_ID,
+    });
+
+    // 6) save to in-memory board
     const activeClientId = clientId || 'default';
     if (!jobsByClient.has(activeClientId)) jobsByClient.set(activeClientId, new Map());
     const jobs = jobsByClient.get(activeClientId);
 
-// ✅ Step 2 — create the appointment (round-robin v1)
-let ghlApptId;
-try {
-  const ghlAppt = await createAppointment({
-  contactId,
-  selectedSlot: req.body.selectedSlot,          // <-- pass through if present
-  selectedTimezone: req.body.timezone,          // optional pass-through
-  startTime,                                    // fallback path uses this
-  timezone: 'America/New_York'
-});
-  ghlApptId = ghlAppt.id || ghlAppt.appointmentId;
-} catch (err) {
-  console.error('[Book Appointment] GHL create error:', err.response?.data || err.message || err);
-  return res.status(500).json({ ok: false, error: 'Failed to create appointment in GHL' });
-}
-
     const job = {
-      appointmentId: ghlApptId,
+      appointmentId: created?.id || created?.appointmentId || 'ghl-unknown',
       address,
       lat: Number(lat) || 0,
       lng: Number(lng) || 0,
-      startTime,
-      endTime,
+      startTime: startISO,
+      endTime: endISO,
       jobType,
       estValue: Number(estValue) || 0,
       territory,
-      contact: { id: contactId, ...contact }
+      contact: { id: contactId, ...(contact || {}) },
     };
 
     jobs.set(job.appointmentId, job);
@@ -283,8 +382,8 @@ try {
 
     return res.json({ ok: true, job });
   } catch (err) {
-    console.error('[Book Appointment] Error:', err);
-    res.status(500).json({ ok: false, error: 'Server error' });
+    console.error('[Book Appointment] Error:', err?.response?.data || err.message || err);
+    return res.status(500).json({ ok: false, error: 'Server error' });
   }
 }
 
