@@ -96,6 +96,35 @@ app.use((req, _res, next) => {
   next()
 })
 
+// put near the top of server.js
+function normalizeContact(raw = {}) {
+  const arr = v => (Array.isArray(v) ? v.filter(Boolean) : []);
+  const phones = [
+    ...arr(raw.phones),
+    raw.phone,
+    raw.mobile,
+    raw.primaryPhone,
+  ].filter(Boolean);
+
+  const emails = [
+    ...arr(raw.emails),
+    raw.email,
+    raw.primaryEmail,
+  ].filter(Boolean);
+
+  return {
+    id: raw.id || raw.contactId || null,
+    name: raw.name || raw.fullName || raw.firstName || '—',
+    company: raw.company || null,
+    phones,
+    emails,
+    address: raw.address || null,
+    tags: Array.isArray(raw.tags) ? raw.tags : [],
+    custom: raw.custom || {},
+    pipeline: raw.pipeline || null,
+  };
+}
+
 // helper: very simple offset fallback (see NOTE)
 const TZ_DEFAULT = 'America/New_York';
 const TZ_OFFSET_FALLBACK = process.env.DEFAULT_TZ_OFFSET || '-04:00'; // EDT default
@@ -256,6 +285,50 @@ app.get('/api/week-appointments', async (req, res) => {
   }
 });
 
+// --- Weather (Open-Meteo) ---
+const weatherCache = new Map(); // key: "lat,lng|days" -> { ts, data }
+const WEATHER_TTL_MS = 30 * 60 * 1000; // 30 min
+
+async function fetchExtendedForecast(lat, lng, days = 16) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  const key = `${lat.toFixed(3)},${lng.toFixed(3)}|${days}`;
+  const hit = weatherCache.get(key);
+  if (hit && (Date.now() - hit.ts) < WEATHER_TTL_MS) return hit.data;
+
+  const base = 'https://api.open-meteo.com/v1/forecast';
+  const url = `${base}?latitude=${lat}&longitude=${lng}&daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto&forecast_days=${Math.min(Math.max(1, days), 16)}`;
+
+  const r = await fetch(url);
+  const j = await r.json();
+
+  const out = (j?.daily?.time || []).map((d, i) => ({
+    date: d,
+    code: j.daily.weathercode?.[i] ?? null,
+    tMax: j.daily.temperature_2m_max?.[i] ?? null,
+    tMin: j.daily.temperature_2m_min?.[i] ?? null,
+    popMax: j.daily.precipitation_probability_max?.[i] ?? null,
+  }));
+
+  const payload = { lat, lng, days: out.length, daily: out };
+  weatherCache.set(key, { ts: Date.now(), data: payload });
+  return payload;
+}
+
+// API: /api/forecast?lat=..&lng=..&days=10
+app.get('/api/forecast', async (req, res) => {
+  try {
+    const lat = Number(req.query.lat);
+    const lng = Number(req.query.lng);
+    const days = Number(req.query.days) || 10;
+    const data = await fetchExtendedForecast(lat, lng, days);
+    if (!data) return res.status(400).json({ ok:false, error:'bad lat/lng' });
+    res.json({ ok:true, ...data });
+  } catch (e) {
+    console.error('[forecast]', e);
+    res.status(500).json({ ok:false, error:'forecast failed' });
+  }
+});
+
 // --- GHL: get messages for a specific conversationId ---
 app.get('/api/ghl/conversation/:conversationId/messages', async (req, res) => {
   try {
@@ -301,7 +374,16 @@ app.get('/api/job/:id', (req, res) => {
   const jobs = jobsByClient.get(clientId) || new Map();
   const job = jobs.get(req.params.id);
   if (!job) return res.status(404).json({ ok: false, error: 'Not found' });
-  res.json(job);
+
+  // Normalize on read so the drawer always has phones/emails/etc.
+  const out = {
+    ...job,
+    estValue: Number(job.estValue) || 0,
+    territory: job.territory || '—',
+    contact: normalizeContact(job.contact || {}),
+  };
+
+  res.json(out);
 });
 
 // add in server.js
@@ -656,17 +738,18 @@ if (missingOrZero && address) {
     if (!jobsByClient.has(activeClientId)) jobsByClient.set(activeClientId, new Map());
     const jobs = jobsByClient.get(activeClientId);
 
-   const job = {
+const job = {
   appointmentId: created?.id || created?.appointmentId || 'ghl-unknown',
   address,
-  lat: Number.isFinite(latNum) ? latNum : 0,   // <-- use latNum
-  lng: Number.isFinite(lngNum) ? lngNum : 0,   // <-- use lngNum
+  lat: Number.isFinite(latNum) ? latNum : 0,
+  lng: Number.isFinite(lngNum) ? lngNum : 0,
   startTime: startISO,
   endTime: endISO,
   jobType,
   estValue: Number(estValue) || 0,
   territory,
-  contact: { id: contactId, ...(contact || {}) },
+  // ⬇️ normalize contact so frontend gets phones/emails arrays, etc.
+  contact: normalizeContact({ id: contactId, ...(contact || {}) }),
 };
 
     jobs.set(job.appointmentId, job);
@@ -717,10 +800,12 @@ console.log("[DEBUG GHL incoming appt]", JSON.stringify(appt, null, 2));
 
       job.contact = { id: contactId, name: contactName, emails: [contactEmail].filter(Boolean), phones: [contactPhone].filter(Boolean) };
 
-      if (job.contact.id || job.contact.emails.length || job.contact.phones.length) {
-        const enriched = await getContact(job.contact.id, { email: job.contact.emails[0], phone: job.contact.phones[0] });
-        job.contact = { ...job.contact, ...enriched };
-      }
+     if (job.contact.id || job.contact.emails.length || job.contact.phones.length) {
+  const enriched = await getContact(job.contact.id, { email: job.contact.emails[0], phone: job.contact.phones[0] });
+  job.contact = normalizeContact({ ...job.contact, ...enriched });
+} else {
+  job.contact = normalizeContact(job.contact);
+}
     } catch {}
 
     jobs.set(job.appointmentId, job);
@@ -803,6 +888,12 @@ function normalizeJob(appt){
   return { appointmentId, customer, address, lat: safeLat, lng: safeLng, startTime, endTime, jobType: custom.jobType || 'Repair', estValue: Number(custom.estValue || 0), territory: custom.territory || 'EAST', day, time }
 }
 
+app.get('/__routes', (_req, res) => {
+  const routes = app._router.stack
+    .filter(l => l.route)
+    .map(l => ({ method: Object.keys(l.route.methods)[0]?.toUpperCase(), path: l.route.path }));
+  res.json(routes);
+});
 
 
 const PORT = process.env.PORT || 8080

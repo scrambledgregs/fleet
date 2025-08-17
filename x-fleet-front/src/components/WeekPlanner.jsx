@@ -10,8 +10,8 @@ const fallbackWeek = [
   { id:'J-412', day:'Wed', time:'4:10 PM', address:'Thomas Rd, Phoenix', lat:33.436, lng:-112.06, jobType:'Reroof', estValue:18000, territory:'EAST' },
   { id:'J-501', day:'Thu', time:'10:00 AM', address:'Oak St, Phoenix', lat:33.46, lng:-112.02, jobType:'Inspection', estValue:0, territory:'EAST' }
 ]
+export default function WeekPlanner({ onSelectJob }) {
 
-export default function WeekPlanner(){
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(null)
@@ -145,15 +145,15 @@ export default function WeekPlanner(){
 
           <div className="space-y-2">
             {groups[day].map(job => (
-              <JobCard
-                key={job.id}
-                job={job}
-                paydayThreshold={settings?.paydayThreshold ?? 2500}
-                busy={busy === job.id}
-                onClick={() => { setOpenId(job.id); setOpenSeed(job); }}
-                onSuggest={() => suggest(job)}
-                onApprove={() => approve(job)}
-              />
+  <JobCard
+  key={job.id}
+  job={job}
+  paydayThreshold={settings?.paydayThreshold ?? 2500}
+  busy={busy === job.id}
+  onClick={() => onSelectJob?.(job)}   // ← forward full job up
+  onSuggest={() => suggest(job)}
+  onApprove={() => approve(job)}
+/>
             ))}
           </div>
         </div>

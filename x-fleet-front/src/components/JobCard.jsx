@@ -1,6 +1,9 @@
+// components/JobCard.jsx
 import { Phone, MapPin, Wrench, Search, Package } from 'lucide-react'
 import { useMemo } from 'react'
+import { useForecast } from '../hooks/useForecast'
 
+// --- helpers ---
 function formatUSD(n) {
   return new Intl.NumberFormat(undefined, {
     style: 'currency',
@@ -9,7 +12,6 @@ function formatUSD(n) {
   }).format(Number(n) || 0)
 }
 
-// Parse anything: 35000, "35000", "35,000", "$35,000", etc.
 function toNumberLoose(v) {
   if (v == null) return 0
   if (typeof v === 'number' && Number.isFinite(v)) return v
@@ -21,14 +23,37 @@ function toNumberLoose(v) {
   return 0
 }
 
-export default function JobCard({
-  job,
-  paydayThreshold = 2500,
-  onClick,
-  onMapClick,
-}) {
+// pick the forecast entry closest to the job's start time (avoids TZ off-by-one)
+function pickNearestDaily(wx, startISO) {
+  if (!wx?.daily?.length || !startISO) return null
+  const t = new Date(startISO).getTime() // UTC ms
+  let best = null
+  let bestDiff = Infinity
+  for (const d of wx.daily) {
+    const utcMidnight = Date.parse(d.date)           // "YYYY-MM-DD" -> UTC midnight
+    const utcNoon = utcMidnight + 12 * 60 * 60 * 1000
+    const diff = Math.abs(utcNoon - t)
+    if (diff < bestDiff) { bestDiff = diff; best = d }
+  }
+  return best
+}
+
+// Open-Meteo weathercode → emoji
+const codeToEmoji = (c) => {
+  if (c == null) return '❔'
+  if ([0].includes(c)) return '☀️'
+  if ([1,2].includes(c)) return '🌤️'
+  if ([3].includes(c)) return '☁️'
+  if ([45,48].includes(c)) return '🌫️'
+  if ([51,53,55].includes(c)) return '🌦️'
+  if ([61,63,65,80,81,82].includes(c)) return '🌧️'
+  if ([71,73,75,85,86].includes(c)) return '❄️'
+  if ([95,96,99].includes(c)) return '⛈️'
+  return '❔'
+}
+
+export default function JobCard({ job, paydayThreshold = 2500, onClick, onMapClick, isSelected }) {
   const value = useMemo(() => {
-    // Try common locations, then fallback to job.estValue
     const raw =
       job?.estValue ??
       job?.est_value ??
@@ -40,6 +65,38 @@ export default function JobCard({
   }, [job])
 
   const isPayday = value >= (Number(paydayThreshold) || 0)
+
+  // --- forecast (10-day default) ---
+  const lat = Number(job?.lat)
+  const lng = Number(job?.lng)
+  const { data: wx, error: wxErr } = useForecast(lat, lng, 10)
+
+  if (import.meta.env?.MODE !== 'production') {
+    console.log('JobCard WX params', { id: job?.id, lat, lng, startTime: job?.startTime })
+    if (wxErr) console.warn('JobCard WX error:', wxErr)
+    console.log('JobCard WX data', wx)
+  }
+
+  const startISO =
+    job?.startTime ||
+    job?.start ||
+    job?.startTimeISO ||
+    job?.start_time ||
+    job?.start_iso ||
+    null
+
+  // match forecast to job date or fallback to first day
+  let dayWx = null
+  if (startISO) {
+    dayWx = pickNearestDaily(wx, startISO)
+  } else if (wx?.daily?.length) {
+    dayWx = wx.daily[0]
+  }
+
+  function toF(c) {
+    if (c == null || isNaN(c)) return null
+    return Math.round((c * 9) / 5 + 32)
+  }
 
   const travelMin =
     typeof job?.travelMinutesFromPrev === 'number'
@@ -58,26 +115,31 @@ export default function JobCard({
   const TypeIcon =
     job?.jobType === 'Inspection' ? Search : job?.jobType === 'Install' ? Package : Wrench
 
-  // Uncomment for a quick sanity check in the browser console:
-  // console.debug('JobCard value check:', { id: job?.id, estValue: job?.estValue, parsed: value, threshold: paydayThreshold })
-
   return (
     <div
       className={[
         'glass rounded-xl p-3 cursor-pointer transition',
-        isPayday ? 'ring-2 ring-yellow-400/70' : 'ring-1 ring-white/10',
+        isSelected ? 'ring-2 ring-sky-400/80 bg-white/[0.03]' : 'ring-1 ring-white/10',
         'hover:translate-y-[-1px] hover:ring-white/30',
       ].join(' ')}
       onClick={onClick}
       role="button"
       aria-label={`Open job ${job?.id}`}
     >
-      {/* top row: date/time + badges */}
+      {/* top row: date/time + badges (with weather) */}
       <div className="flex items-center justify-between">
         <div className="text-xs text-white/60">
           {job?.day} • {job?.dateText} • {job?.time}
         </div>
         <div className="flex items-center gap-1">
+          {dayWx && (
+            <span
+              title={`High ${toF(dayWx.tMax)}°F / Low ${toF(dayWx.tMin)}°F • POP ${dayWx.popMax ?? 0}%`}
+              className="text-[10px] px-2 py-0.5 rounded-full bg-white/10 text-white/80"
+            >
+              {codeToEmoji(dayWx.code)} {toF(dayWx.tMax)}°/{toF(dayWx.tMin)}° • {(dayWx.popMax ?? 0)}%
+            </span>
+          )}
           {job?.territory && (
             <span className="text-[10px] px-2 py-0.5 rounded-full bg-white/10 text-white/70">
               {job.territory}
@@ -114,7 +176,6 @@ export default function JobCard({
         <span className={`text-xs px-2 py-1 rounded ${travelColor}`}>
           {travelMin == null ? 'No prior travel' : `Travel +${travelMin}m`}
         </span>
-
         {typeof job?.fitScore === 'number' && (
           <span className="text-xs px-2 py-1 rounded bg-white/10 text-white/80">
             ⚡ Fit {job.fitScore.toFixed(1)}
