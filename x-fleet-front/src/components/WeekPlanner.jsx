@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
-import { CalendarDays, Wand2, CheckCircle2, Clock, Eye } from 'lucide-react'
+import { CalendarDays, Clock } from 'lucide-react'
 import JobDetails from './JobDetails.jsx'
 import { API_BASE } from '../config'
+import JobCard from './JobCard'
 
 const fallbackWeek = [
   { id:'J-158', day:'Tue', time:'1:15 PM', address:'Palm Ln, Phoenix', lat:33.455, lng:-112.05, jobType:'Reroof', estValue:35000, territory:'EAST' },
@@ -13,7 +14,7 @@ const fallbackWeek = [
 export default function WeekPlanner(){
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(true)
-  const [busy, setBusy] = useState(null) // job id being processed
+  const [busy, setBusy] = useState(null)
   const [openId, setOpenId] = useState(null)
   const [openSeed, setOpenSeed] = useState(null)
 
@@ -23,22 +24,34 @@ export default function WeekPlanner(){
         const r = await fetch(`${API_BASE}/api/week-appointments`)
         if (!r.ok) throw new Error('no api')
         const data = await r.json()
-const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
-const normalized = (data || []).map(j => {
-  const d = new Date(j.startTime || Date.now())
-  return {
-    ...j,
-    day: j.day || d.toLocaleDateString(undefined, { weekday: 'short', timeZone: tz }),
-    time: j.time || d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', timeZone: tz }),
-    dateText: j.dateText || d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: tz }),
-  }
-})
-setItems(normalized.length ? normalized : fallbackWeek)
+        const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
+        const normalized = (data || []).map(j => {
+          const d = new Date(j.startTime || Date.now())
+          return {
+            ...j,
+            day: j.day || d.toLocaleDateString(undefined, { weekday: 'short', timeZone: tz }),
+            time: j.time || d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', timeZone: tz }),
+            dateText: j.dateText || d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: tz }),
+          }
+        })
+        setItems(normalized.length ? normalized : fallbackWeek)
       } catch(e){
         setItems(fallbackWeek)
       } finally {
         setLoading(false)
       }
+    })()
+  }, [])
+
+  // new
+  const [settings, setSettings] = useState({ paydayThreshold: 2500 })
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await fetch(`${API_BASE}/api/client-settings?clientId=default`)
+        const j = await r.json()
+        if (j?.ok && j?.settings) setSettings(j.settings)
+      } catch {/* keep default */}
     })()
   }, [])
 
@@ -121,59 +134,26 @@ setItems(normalized.length ? normalized : fallbackWeek)
         <div key={day} className="glass rounded-none p-3">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2">
-<CalendarDays size={16} className="text-white/70"/>
-<div className="font-semibold">
-  {day}
-  <span className="text-white/60 ml-2">• {groups[day][0]?.dateText}</span>
-  </div>
-
+              <CalendarDays size={16} className="text-white/70"/>
+              <div className="font-semibold">
+                {day}
+                <span className="text-white/60 ml-2">• {groups[day][0]?.dateText}</span>
+              </div>
             </div>
             <div className="text-xs text-white/60">{groups[day].length} appt(s)</div>
           </div>
 
           <div className="space-y-2">
             {groups[day].map(job => (
-              <div key={job.id} className="border border-white/5 p-2 flex items-center justify-between">
-                <div>
-                  <div className="font-medium">{job.time} — {job.address}</div>
-                  <div className="text-xs text-white/60">{job.jobType} • ${job.estValue.toLocaleString()} • {job.territory}</div>
-
-                  {job.suggestion && (
-                    <div className="text-xs mt-1">
-                      <span className="text-success">Suggested:</span>{' '}
-                      {job.suggestion.repName || job.suggestion.repId}{' '}
-                      <span className="text-white/60">— {job.suggestion.reason}</span>
-                    </div>
-                  )}
-                  {job.status==='booked' && <div className="text-xs text-success mt-1 flex items-center gap-1"><CheckCircle2 size={14}/> Auto-booked</div>}
-                  {job.status==='awaiting_approval' && <div className="text-xs text-warning mt-1">Awaiting approval</div>}
-                  {job.status==='error' && <div className="text-xs text-red-400 mt-1">Error suggesting</div>}
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={()=>{ setOpenId(job.id); setOpenSeed(job); }}
-                    className="px-2.5 py-1.5 rounded-none glass hover:bg-panel/70 transition text-sm flex items-center gap-2"
-                  >
-                    <Eye size={16}/> View
-                  </button>
-
-                  <button
-                    disabled={busy===job.id}
-                    onClick={()=>suggest(job)}
-                    className="px-2.5 py-1.5 rounded-none bg-accent hover:brightness-110 transition text-sm flex items-center gap-2"
-                  >
-                    <Wand2 size={16}/> {busy===job.id?'Scoring…':'Suggest'}
-                  </button>
-
-                  <button
-                    onClick={()=>approve(job)}
-                    className="px-2.5 py-1.5 rounded-none glass hover:bg-panel/70 transition text-sm"
-                  >
-                    Approve
-                  </button>
-                </div>
-              </div>
+              <JobCard
+                key={job.id}
+                job={job}
+                paydayThreshold={settings?.paydayThreshold ?? 2500}
+                busy={busy === job.id}
+                onClick={() => { setOpenId(job.id); setOpenSeed(job); }}
+                onSuggest={() => suggest(job)}
+                onApprove={() => approve(job)}
+              />
             ))}
           </div>
         </div>

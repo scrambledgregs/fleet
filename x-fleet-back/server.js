@@ -18,7 +18,7 @@ import {
   createAppointmentV2,
 } from './lib/ghl.js';
 
-
+const geocodeCache = new Map();
 const app = express()
 const server = http.createServer(app)
 const io = new SocketIOServer(server, {
@@ -27,22 +27,62 @@ const io = new SocketIOServer(server, {
 
 async function geocodeAddress(address) {
   if (!address) return null;
+  const hit = geocodeCache.get(address);
+  if (hit) return hit;
   const apiKey = process.env.GOOGLE_MAPS_API_KEY;
   const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${apiKey}`;
   const resp = await fetch(url);
   const data = await resp.json();
   console.log('[Geocode API Response]', JSON.stringify(data, null, 2));
   if (data.status === 'OK' && data.results.length > 0) {
-    const loc = data.results[0].geometry.location;
-    return { lat: loc.lat, lng: loc.lng };
+  const loc = data.results[0].geometry.location;
+  const out = { lat: loc.lat, lng: loc.lng };
+  geocodeCache.set(address, out);
+  return out;
+}
+
+  return null;  // ✅ fallback if nothing comes back
+}
+// --- Distance Matrix (drive time) helper ---
+const driveCache = new Map(); // key: "lat1,lng1|lat2,lng2" -> minutes
+
+async function getDriveMinutes(from, to) {
+  if (!from || !to) return null;
+  const f = `${from.lat},${from.lng}`;
+  const t = `${to.lat},${to.lng}`;
+  if (!/^-?\d+(\.\d+)?,\-?\d+(\.\d+)?$/.test(f) || !/^-?\d+(\.\d+)?,\-?\d+(\.\d+)?$/.test(t)) return null;
+
+  const key = `${f}|${t}`;
+  const hit = driveCache.get(key);
+  if (hit) return hit;
+
+  const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+  const url = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${encodeURIComponent(f)}&destinations=${encodeURIComponent(t)}&mode=driving&departure_time=now&key=${apiKey}`;
+
+  try {
+    const r = await fetch(url);
+    const data = await r.json();
+    const elem = data?.rows?.[0]?.elements?.[0];
+    const seconds = elem?.duration_in_traffic?.value ?? elem?.duration?.value;
+    if (typeof seconds === 'number') {
+      const minutes = Math.round(seconds / 60);
+      driveCache.set(key, minutes);
+      return minutes;
+    }
+  } catch (e) {
+    console.warn('[DriveTime] fetch failed', e.message);
   }
-  console.warn('[Geocode] Failed for address:', address, data.status);
   return null;
 }
 
 // In-memory store per client
 const techsByClient = new Map(); // clientId -> tech array
 const jobsByClient  = new Map(); // clientId -> Map(appointmentId -> job)
+
+// --- MOCK CONVERSATIONS (dev/testing) ---
+const mockConvos = new Map();      // conversationId -> { id, contactId, messages: [...] }
+const mockByContact = new Map();   // contactId -> conversationId
+const uuid = () => 'c_' + Math.random().toString(36).slice(2);
 
 app.use(cors({ origin: process.env.ALLOW_ORIGIN || '*' }))
 app.use(express.json({ limit: '10mb' }))
@@ -139,40 +179,129 @@ app.post('/api/clear-jobs', (req, res) => {
   res.json({ ok: true, message: `Jobs cleared for ${clientId}` })
 })
 
-app.get('/api/week-appointments', (req, res) => {
-  const clientId = req.query.clientId || 'default';
-  const jobs = jobsByClient.get(clientId) || new Map();
+app.get('/api/week-appointments', async (req, res) => {
+  try {
+    const clientId = req.query.clientId || 'default';
+    const jobsMap = jobsByClient.get(clientId) || new Map();
 
-  const list = Array.from(jobs.values()).map(j => {
-    const d = j.startTime ? new Date(j.startTime) : new Date();
-    let day = j.day, time = j.time;
+    // normalize
+    const items = Array.from(jobsMap.values()).map(j => {
+      const d = j.startTime ? new Date(j.startTime) : new Date();
+      let day = j.day, time = j.time;
 
-    if (!day || !time) {
-      day  = d.toLocaleDateString(undefined, { weekday: 'short' });
-      time = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+      if (!day || !time) {
+        day  = d.toLocaleDateString(undefined, { weekday: 'short' });
+        time = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+      }
+
+      const dateText = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+
+      return {
+        id: j.appointmentId,
+        startTimeISO: d.toISOString(),
+        day, time, dateText,
+        address: toAddressString(j.address),
+        lat: j.lat, lng: j.lng,
+        jobType: j.jobType,
+        estValue: j.estValue,
+        territory: j.territory,
+        contact: j.contact,
+        travelMinutesFromPrev: null,
+      };
+    });
+
+    // sort by time
+    items.sort((a, b) => new Date(a.startTimeISO) - new Date(b.startTimeISO));
+
+    // compute drive times per day
+    const byDay = new Map();
+    for (const it of items) {
+      if (!byDay.has(it.day)) byDay.set(it.day, []);
+      byDay.get(it.day).push(it);
     }
 
-    const dateText = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); // 👈 add this
+    for (const list of byDay.values()) {
+      list.sort((a, b) => new Date(a.startTimeISO) - new Date(b.startTimeISO));
+      for (let i = 1; i < list.length; i++) {
+        const prev = list[i - 1];
+        const curr = list[i];
+        if (prev.lat != null && prev.lng != null && curr.lat != null && curr.lng != null) {
+          curr.travelMinutesFromPrev = await getDriveMinutes(
+            { lat: prev.lat, lng: prev.lng },
+            { lat: curr.lat, lng: curr.lng }
+          );
+        }
+      }
+    }
 
-    return {
-      id: j.appointmentId,
-      // helpful for the UI:
-      startTime: d.toISOString(),  // 👈 lets you sort client-side if needed
-      day,
-      time,
-      dateText,                    // 👈 show “Aug 27” (or your locale) on the card
-      address: toAddressString(j.address),
-      lat: j.lat, lng: j.lng,
-      jobType: j.jobType,
-      estValue: j.estValue,
-      territory: j.territory,
-      contact: j.contact,
+    const out = items.map(it => ({
+      id: it.id,
+      startTime: it.startTimeISO,
+      day: it.day,
+      time: it.time,
+      dateText: it.dateText,
+      address: it.address,
+      lat: it.lat, lng: it.lng,
+      jobType: it.jobType,
+      estValue: Number(it.estValue) || 0, 
+      territory: it.territory,
+      contact: it.contact,
+      travelMinutesFromPrev: it.travelMinutesFromPrev,
+    }));
+
+    res.json(out);
+  } catch (e) {
+    console.error('[week-appointments]', e);
+    res.status(500).json({ ok: false, error: 'failed to build week' });
+  }
+});
+
+// --- GHL: get messages for a specific conversationId ---
+app.get('/api/ghl/conversation/:conversationId/messages', async (req, res) => {
+  try {
+    const conversationId = req.params.conversationId;
+    const base = process.env.GHL_API_BASE || 'https://services.leadconnectorhq.com';
+
+    if (!process.env.GHL_ACCESS_TOKEN) {
+      return res.status(500).json({ ok:false, error:'GHL_ACCESS_TOKEN missing' });
+    }
+
+    const headers = {
+      Authorization: `Bearer ${process.env.GHL_ACCESS_TOKEN}`,
+      Accept: 'application/json',
+      Version: '2021-04-15',
+      ...(process.env.GHL_LOCATION_ID ? { 'Location-Id': process.env.GHL_LOCATION_ID } : {})
     };
-  })
-  // optional: sort by start time so the list is ordered
-  .sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
 
-  res.json(list);
+    const url = new URL(`/conversations/${encodeURIComponent(conversationId)}/messages`, base);
+    url.searchParams.set('page', '1');
+    url.searchParams.set('limit', '50');
+
+    const resp = await axios.get(url.toString(), { headers, timeout: 15000 });
+    const raw = Array.isArray(resp.data?.messages) ? resp.data.messages : (resp.data?.data || []);
+
+    const messages = raw.map(m => ({
+      id: m.id,
+      direction: m.direction || (m.fromMe ? 'outbound' : 'inbound'),
+      channel: m.channel || m.type,
+      text: m.message || m.text || '',
+      attachments: m.attachments || [],
+      createdAt: m.createdAt || m.dateAdded || m.timestamp,
+    }));
+
+    res.json({ ok:true, conversationId, messages });
+  } catch (e) {
+    console.error('[conversation messages]', e?.response?.data || e.message);
+    res.status(500).json({ ok:false, error: e?.response?.data || e.message });
+  }
+});
+
+app.get('/api/job/:id', (req, res) => {
+  const clientId = req.query.clientId || 'default';
+  const jobs = jobsByClient.get(clientId) || new Map();
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ ok: false, error: 'Not found' });
+  res.json(job);
 });
 
 // add in server.js
@@ -198,40 +327,35 @@ app.get('/api/debug/calendar', async (req, res) => {
   }
 });
 
-// REPLACE the entire /api/suggest-times route with this:
+// REPLACE your existing /api/suggest-times with this version
 app.post('/api/suggest-times', async (req, res) => {
   try {
     const {
-      date,                                    // YYYY-MM-DD
+      clientId = 'default',
+      date,                       // YYYY-MM-DD (required)
       timezone = TZ_DEFAULT,
-      address,
+      address,                    // new job address (helps routing)
       jobType = 'Repair',
       estValue = 0,
       territory = 'EAST',
+      durationMin = 60,           // desired job length
+      bufferMin = 15,             // min setup/tear-down buffer
+      maxDetourMin = 60           // max total extra drive time you’ll accept
     } = req.body;
 
-    if (!date) {
-      return res.status(400).json({ ok: false, error: 'date (YYYY-MM-DD) is required' });
-    }
+    if (!date) return res.status(400).json({ ok:false, error:'date (YYYY-MM-DD) is required' });
 
+    // --- 1) Get free slots from GHL ---
     const calendarId = process.env.GHL_CALENDAR_ID;
-    if (!calendarId) {
-      return res.status(500).json({ ok: false, error: 'GHL_CALENDAR_ID is not set in .env' });
+    if (!calendarId || !process.env.GHL_ACCESS_TOKEN) {
+      return res.status(500).json({ ok:false, error:'GHL env vars missing' });
     }
-    if (!process.env.GHL_ACCESS_TOKEN) {
-      return res.status(500).json({ ok: false, error: 'GHL_ACCESS_TOKEN is not set in .env' });
-    }
-
-    // Build v2 free-slots URL
     const base = 'https://services.leadconnectorhq.com';
     const free = new URL(`/calendars/${calendarId}/free-slots`, base);
 
-    // NOTE: for perfect accuracy across DST, compute real offset for `timezone`.
-    // This fallback uses a fixed offset (-04:00 by default).
     const { startMs, endMs } = dayBoundsEpochMs(date, TZ_OFFSET_FALLBACK);
-
-    free.searchParams.set('startDate', String(startMs)); // epoch ms (string)
-    free.searchParams.set('endDate',   String(endMs));   // epoch ms (string)
+    free.searchParams.set('startDate', String(startMs));
+    free.searchParams.set('endDate',   String(endMs));
     free.searchParams.set('timezone',  timezone);
 
     const { data } = await axios.get(free.toString(), {
@@ -243,62 +367,178 @@ app.post('/api/suggest-times', async (req, res) => {
       timeout: 15000,
     });
 
-    console.log('[DEBUG free-slots raw]', JSON.stringify(data, null, 2));
+    const freeSlots = extractSlotsFromGHL(data); // [{start,end}]
 
-    // map into {start, end} ISO strings the UI expects
-    const slots = extractSlotsFromGHL(data);
+    // --- 2) Prepare the "new job" location (for travel calc) ---
+    let newLoc = null;
+    if (address) {
+      try { newLoc = await geocodeAddress(address); } catch {}
+    }
 
-const suggestions = slots.map(x => ({
-  ...x,
-  tech: undefined,
-  jobType,
-  estValue: Number(estValue) || 0,
-  territory,
-  address,
-}));
+    // --- 3) Pull existing jobs for this client+day from the dispatch board ---
+    const jobsMap = jobsByClient.get(clientId) || new Map();
+    const dayJobs = Array.from(jobsMap.values())
+      .filter(j => {
+        const t = new Date(j.startTime).getTime();
+        return t >= startMs && t <= endMs;
+      })
+      .map(j => ({
+        id: j.appointmentId,
+        start: new Date(j.startTime).getTime(),
+        end:   new Date(j.endTime || new Date(new Date(j.startTime).getTime() + 60*60*1000)).getTime(),
+        lat: j.lat, lng: j.lng,
+        address: j.address,
+        territory: j.territory,
+        estValue: j.estValue
+      }))
+      .sort((a,b)=>a.start-b.start);
 
-    return res.json({ ok: true, suggestions });
+    // helper to find prev/next jobs around a start time
+    function neighbors(startMs) {
+      let prev = null, next = null;
+      for (const j of dayJobs) {
+        if (j.end <= startMs) prev = j;
+        if (j.start >= startMs) { next = j; break; }
+      }
+      return { prev, next };
+    }
+
+    // --- 4) Filter GHL slots by overlap + travel fit ---
+    const accepted = [];
+    for (const s of freeSlots) {
+      const start = new Date(s.start).getTime();
+      const end   = start + durationMin*60*1000;
+
+      // basic overlap check against existing jobs
+      const overlaps = dayJobs.some(j => !(end <= j.start || start >= j.end));
+      if (overlaps) continue;
+
+      const { prev, next } = neighbors(start);
+
+      // travel/time feasibility
+      let travelPrev = 0, travelNext = 0;
+
+      if (prev && newLoc && prev.lat != null && prev.lng != null) {
+        const mins = await getDriveMinutes({lat:prev.lat,lng:prev.lng}, newLoc);
+        if (mins != null) travelPrev = mins;
+        // enough time between prev job end + buffer and new start?
+        const gap = (start - prev.end) / 60000; // min
+        if (gap < (bufferMin + travelPrev)) continue;
+      }
+
+      if (next && newLoc && next.lat != null && next.lng != null) {
+        const mins = await getDriveMinutes(newLoc, {lat:next.lat,lng:next.lng});
+        if (mins != null) travelNext = mins;
+        // enough time from new end + buffer to next start?
+        const gap = (next.start - end) / 60000; // min
+        if (gap < (bufferMin + travelNext)) continue;
+      }
+
+      // territory sanity (optional hard filter)
+      if (territory && dayJobs.length) {
+        const badNeighbor =
+          (prev && prev.territory && prev.territory !== territory) ||
+          (next && next.territory && next.territory !== territory);
+        // If you want soft scoring instead, remove this "continue"
+        if (badNeighbor) continue;
+      }
+
+      const totalDetour = travelPrev + travelNext;
+
+      if (totalDetour > maxDetourMin) continue;
+
+      // simple score: value bias minus travel penalty (tune as you like)
+      const score = (Number(estValue)||0)/1000 - (totalDetour/10);
+
+      accepted.push({
+        start: new Date(start).toISOString(),
+        end:   new Date(end).toISOString(),
+        jobType,
+        estValue: Number(estValue)||0,
+        territory,
+        address,
+        travel: { fromPrev: travelPrev || null, toNext: travelNext || null, total: totalDetour || 0 },
+        neighbors: { prev: prev?.id || null, next: next?.id || null },
+        reason: `fits route (+${totalDetour}m travel, ${bufferMin}m buffer)`,
+        score
+      });
+    }
+
+    // sort best-first
+    accepted.sort((a,b)=>b.score-a.score);
+
+    return res.json({ ok:true, suggestions: accepted });
   } catch (err) {
-    const payload = err?.response?.data || { message: err.message };
-    console.error('[suggest-times error]', payload);
-    const msg = payload?.msg || payload?.message || 'Availability lookup failed';
-    return res.status(500).json({ ok: false, error: msg });
+    console.error('[suggest-times error]', err?.response?.data || err.message);
+    const msg = err?.response?.data?.message || err?.message || 'Availability lookup failed';
+    return res.status(500).json({ ok:false, error: msg });
   }
 });
+// Create (or reuse) a mock conversation and add a message
+app.post('/api/mock/ghl/send-message', (req, res) => {
+  const { contactId, text = '', direction = 'outbound', channel = 'sms' } = req.body || {};
+  if (!contactId) return res.status(400).json({ ok:false, error:'contactId required' });
 
-// v2 availability (free-slots)
-app.get('/api/availability', async (req, res) => {
-  try {
-    const calendarId = req.query.calendarId || process.env.GHL_CALENDAR_ID;
-    const date = req.query.date;
-    const timezone = req.query.timezone || TZ_DEFAULT;
-
-    if (!calendarId) return res.status(400).json({ ok: false, error: 'calendarId is required' });
-    if (!date) return res.status(400).json({ ok: false, error: 'date (YYYY-MM-DD) is required' });
-
-    const { startMs, endMs } = dayBoundsEpochMs(String(date), TZ_OFFSET_FALLBACK);
-
-    const base = 'https://services.leadconnectorhq.com';
-    const free = new URL(`/calendars/${calendarId}/free-slots`, base);
-    free.searchParams.set('startDate', String(startMs));
-    free.searchParams.set('endDate',   String(endMs));
-    free.searchParams.set('timezone',  String(timezone));
-
-    const { data } = await axios.get(free.toString(), {
-      headers: {
-        Authorization: `Bearer ${process.env.GHL_ACCESS_TOKEN}`,
-        Version: '2021-04-15',
-        Accept: 'application/json',
-      },
-      timeout: 15000,
-    });
-
-    const slots = extractSlotsFromGHL(data);
-    return res.json({ ok: true, slots });
-  } catch (err) {
-    console.error('[Availability v2 Error]', err?.response?.data || err.message);
-    return res.status(500).json({ ok: false, error: err?.response?.data || err.message });
+  let convoId = mockByContact.get(contactId);
+  if (!convoId) {
+    convoId = uuid();
+    mockByContact.set(contactId, convoId);
+    mockConvos.set(convoId, { id: convoId, contactId, messages: [] });
   }
+  const convo = mockConvos.get(convoId);
+  const msg = {
+    id: uuid(),
+    direction,              // 'inbound' | 'outbound'
+    channel,                // 'sms' | 'email' | etc
+    text,
+    createdAt: new Date().toISOString(),
+  };
+  convo.messages.push(msg);
+  return res.json({ ok:true, conversationId: convoId, message: msg });
+});
+
+// List mock conversations for a contact (if any)
+app.get('/api/mock/ghl/contact/:contactId/conversations', (req, res) => {
+  const contactId = req.params.contactId;
+  const convoId = mockByContact.get(contactId);
+  if (!convoId) return res.json({ ok:true, contactId, conversations: [] });
+  return res.json({ ok:true, contactId, conversations: [{ id: convoId, unreadCount: 0, starred: false, type: 0 }] });
+});
+
+// List mock messages for a conversation
+app.get('/api/mock/ghl/conversation/:conversationId/messages', (req, res) => {
+  const convo = mockConvos.get(req.params.conversationId);
+  if (!convo) return res.status(404).json({ ok:false, error:'not found' });
+  return res.json({ ok:true, conversationId: convo.id, messages: convo.messages });
+});
+
+// --- Client settings (in-memory for now) ---
+const DEFAULT_PAYDAY_THRESHOLD = Number(process.env.DEFAULT_PAYDAY_THRESHOLD || 2500);
+
+// Optional per-client overrides. You can persist later (DB).
+// Key = clientId, Value = { paydayThreshold: number }
+const clientSettings = new Map();
+// Example seed:
+// clientSettings.set('acme', { paydayThreshold: 5000 });
+
+app.get('/api/client-settings', (req, res) => {
+  const clientId = (req.query.clientId || 'default').trim();
+  const saved = clientSettings.get(clientId) || {};
+  const paydayThreshold =
+    Number.isFinite(saved.paydayThreshold) ? saved.paydayThreshold : DEFAULT_PAYDAY_THRESHOLD;
+
+  res.json({ ok: true, clientId, settings: { paydayThreshold } });
+});
+
+// (Optional) simple setter you can call from an admin tool or curl
+app.post('/api/client-settings', (req, res) => {
+  const clientId = (req.body.clientId || 'default').trim();
+  const paydayThreshold = Number(req.body.paydayThreshold);
+  if (!Number.isFinite(paydayThreshold) || paydayThreshold < 0) {
+    return res.status(400).json({ ok: false, error: 'paydayThreshold must be a non-negative number' });
+  }
+  clientSettings.set(clientId, { paydayThreshold });
+  res.json({ ok: true, clientId, settings: { paydayThreshold } });
 });
 
 // ---- Book appointment and push to GHL ----
@@ -396,23 +636,38 @@ async function handleBookAppointment(req, res) {
       assignedUserId: assignedUserId || process.env.GHL_USER_ID,
     });
 
+    // --- ensure we have real coordinates for this address ---
+let latNum = Number(lat);
+let lngNum = Number(lng);
+const missingOrZero =
+  !Number.isFinite(latNum) || !Number.isFinite(lngNum) || (latNum === 0 && lngNum === 0);
+
+if (missingOrZero && address) {
+  try {
+    const geo = await geocodeAddress(address);
+    if (geo) { latNum = geo.lat; lngNum = geo.lng; }
+  } catch (e) {
+    console.warn('[Geocode] create-appointment lookup failed:', e.message);
+  }
+}
+
     // Store job locally
     const activeClientId = clientId || 'default';
     if (!jobsByClient.has(activeClientId)) jobsByClient.set(activeClientId, new Map());
     const jobs = jobsByClient.get(activeClientId);
 
-    const job = {
-      appointmentId: created?.id || created?.appointmentId || 'ghl-unknown',
-      address,
-      lat: Number(lat) || 0,
-      lng: Number(lng) || 0,
-      startTime: startISO,
-      endTime: endISO,
-      jobType,
-      estValue: Number(estValue) || 0,
-      territory,
-      contact: { id: contactId, ...(contact || {}) },
-    };
+   const job = {
+  appointmentId: created?.id || created?.appointmentId || 'ghl-unknown',
+  address,
+  lat: Number.isFinite(latNum) ? latNum : 0,   // <-- use latNum
+  lng: Number.isFinite(lngNum) ? lngNum : 0,   // <-- use lngNum
+  startTime: startISO,
+  endTime: endISO,
+  jobType,
+  estValue: Number(estValue) || 0,
+  territory,
+  contact: { id: contactId, ...(contact || {}) },
+};
 
     jobs.set(job.appointmentId, job);
     io.emit('job:created', job);
