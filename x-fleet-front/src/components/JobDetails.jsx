@@ -8,7 +8,7 @@ function addrToString(a) {
   if (!a) return ''
   if (typeof a === 'string') return a
   const parts = [
-    a.fullAddress,
+    a.fullAddress || a.full_address,
     [a.address, a.city, a.state, a.postalCode].filter(Boolean).join(', '),
   ].filter(Boolean)
   return parts[0] || ''
@@ -160,7 +160,9 @@ export default function JobDetails({ jobId, seed, onClose }) {
   if (loading) return <div className="p-4 text-sm text-white/60">Loading…</div>
   if (!data) return <div className="p-4 text-sm text-white/60">Not found.</div>
 
-  const c = data.contact || {}
+  // ⬇️ Normalize the contact here so phones/emails are arrays
+  const c = normalizeContact(data?.contact || {})
+
   const jobAddr = addrToString(data.address)
   const contactAddr = addrToString(c.address)
   const showBoth = jobAddr && contactAddr && jobAddr !== contactAddr
@@ -277,7 +279,7 @@ export default function JobDetails({ jobId, seed, onClose }) {
                 <div className="flex flex-col gap-1">
                   <div className="flex items-center gap-2">
                     <MapPin size={14} />
-                    <span>{jobAddr || '—'}</span>
+                    <span>{jobAddr || contactAddr || '—'}</span>
                   </div>
                   {showBoth && (
                     <div className="pl-6 text-xs text-white/70">Contact Address: {contactAddr}</div>

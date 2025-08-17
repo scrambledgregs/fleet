@@ -1,3 +1,4 @@
+// src/components/WeekPlanner.jsx
 import { useEffect, useMemo, useState } from 'react'
 import { CalendarDays, Clock } from 'lucide-react'
 import JobDetails from './JobDetails.jsx'
@@ -10,13 +11,16 @@ const fallbackWeek = [
   { id:'J-412', day:'Wed', time:'4:10 PM', address:'Thomas Rd, Phoenix', lat:33.436, lng:-112.06, jobType:'Reroof', estValue:18000, territory:'EAST' },
   { id:'J-501', day:'Thu', time:'10:00 AM', address:'Oak St, Phoenix', lat:33.46, lng:-112.02, jobType:'Inspection', estValue:0, territory:'EAST' }
 ]
-export default function WeekPlanner({ onSelectJob }) {
 
+export default function WeekPlanner({ selectedJobId, onSelectJob }) {
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(null)
+
+  // drawer state
   const [openId, setOpenId] = useState(null)
   const [openSeed, setOpenSeed] = useState(null)
+  const useLocalDrawer = !onSelectJob
 
   useEffect(() => {
     (async () => {
@@ -35,7 +39,7 @@ export default function WeekPlanner({ onSelectJob }) {
           }
         })
         setItems(normalized.length ? normalized : fallbackWeek)
-      } catch(e){
+      } catch {
         setItems(fallbackWeek)
       } finally {
         setLoading(false)
@@ -43,7 +47,7 @@ export default function WeekPlanner({ onSelectJob }) {
     })()
   }, [])
 
-  // new
+  // client settings (for payday badge)
   const [settings, setSettings] = useState({ paydayThreshold: 2500 })
   useEffect(() => {
     (async () => {
@@ -51,16 +55,20 @@ export default function WeekPlanner({ onSelectJob }) {
         const r = await fetch(`${API_BASE}/api/client-settings?clientId=default`)
         const j = await r.json()
         if (j?.ok && j?.settings) setSettings(j.settings)
-      } catch {/* keep default */}
+      } catch {
+        /* keep default */
+      }
     })()
   }, [])
 
+  // group by day label
   const groups = useMemo(() => {
     const by = {}
-    for (const j of items){ (by[j.day] ||= []).push(j) }
+    for (const j of items) (by[j.day] ||= []).push(j)
     return by
   }, [items])
 
+  // actions
   async function suggest(job){
     setBusy(job.id)
     const startISO = new Date().toISOString()
@@ -74,7 +82,9 @@ export default function WeekPlanner({ onSelectJob }) {
     }
     try {
       const r = await fetch(`${API_BASE}/ghl/appointment-created`, {
-        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(payload)
       })
       const data = await r.json().catch(()=>({}))
       setItems(prev => prev.map(x =>
@@ -86,7 +96,7 @@ export default function WeekPlanner({ onSelectJob }) {
             })
           : x
       ))
-    } catch(e) {
+    } catch {
       setItems(prev => prev.map(x => x.id===job.id ? ({ ...x, status:'error' }) : x))
     } finally {
       setBusy(null)
@@ -113,22 +123,38 @@ export default function WeekPlanner({ onSelectJob }) {
       })
       if(!r.ok) throw new Error('approve_failed')
       setItems(prev => prev.map(x => x.id===job.id ? ({ ...x, status: 'booked' }) : x))
-    }catch(e){
+    }catch{
       alert('Approve failed. Is the backend running?')
     }
   }
 
+  // open drawer with id + seed
+  const handleOpen = (job) => {
+    const id = job?.appointmentId || job?.id
+    if (!id) return
+    setOpenId(id)
+    setOpenSeed(job)
+  }
+
   if (loading) {
-    return <div className="text-white/60 text-sm p-3 flex items-center gap-2">
-      <Clock size={16}/> Loading week…
-    </div>
+    return (
+      <div className="text-white/60 text-sm p-3 flex items-center gap-2">
+        <Clock size={16}/> Loading week…
+      </div>
+    )
   }
 
   const daysOrder = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']
 
   return (
-    <div className="space-y-3 overflow-auto" style={{maxHeight:'70vh'}}>
-      {openId && <JobDetails jobId={openId} seed={openSeed} onClose={()=>{ setOpenId(null); setOpenSeed(null); }} />}
+    <div className="space-y-3 overflow-auto" style={{ maxHeight:'70vh' }}>
+      {useLocalDrawer && openId && (
+        <JobDetails
+          jobId={openId}
+          seed={openSeed}
+          onClose={() => { setOpenId(null); setOpenSeed(null) }}
+        />
+      )}
 
       {daysOrder.filter(d => groups[d]?.length).map(day => (
         <div key={day} className="glass rounded-none p-3">
@@ -144,17 +170,29 @@ export default function WeekPlanner({ onSelectJob }) {
           </div>
 
           <div className="space-y-2">
-            {groups[day].map(job => (
-  <JobCard
-  key={job.id}
-  job={job}
-  paydayThreshold={settings?.paydayThreshold ?? 2500}
-  busy={busy === job.id}
-  onClick={() => onSelectJob?.(job)}   // ← forward full job up
-  onSuggest={() => suggest(job)}
-  onApprove={() => approve(job)}
-/>
-            ))}
+     
+        {groups[day].map(job => {
+          const id = job.appointmentId || job.id
+          return (
+            <JobCard
+            key={id}
+            job={job}
+            paydayThreshold={settings?.paydayThreshold ?? 2500}
+            isSelected={id === selectedJobId}
+            busy={busy === id}
+            onOpen={() => {
+              if (onSelectJob) {
+                onSelectJob(job)        // ← propagate to parent/right panel
+                } else {
+                  setOpenId(id)           // ← fallback to local drawer
+                  setOpenSeed(job)
+                }
+              }}
+              onSuggest={() => suggest(job)}
+              onApprove={() => approve(job)}
+              />
+            )
+          })}
           </div>
         </div>
       ))}

@@ -40,7 +40,11 @@ function Dashboard({ mode, setMode, compact, setCompact }) {
 
       {/* One place to show details, regardless of view */}
       {selectedJob && (
-        <JobDetails job={selectedJob} onClose={() => setSelectedJob(null)} />
+        <JobDetails
+        jobId={selectedJob.appointmentId || selectedJob.id}
+        seed={selectedJob}
+        onClose={() => setSelectedJob(null)}
+        />
       )}
     </div>
   )

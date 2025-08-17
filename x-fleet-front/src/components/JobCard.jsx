@@ -26,11 +26,11 @@ function toNumberLoose(v) {
 // pick the forecast entry closest to the job's start time (avoids TZ off-by-one)
 function pickNearestDaily(wx, startISO) {
   if (!wx?.daily?.length || !startISO) return null
-  const t = new Date(startISO).getTime() // UTC ms
+  const t = new Date(startISO).getTime()
   let best = null
   let bestDiff = Infinity
   for (const d of wx.daily) {
-    const utcMidnight = Date.parse(d.date)           // "YYYY-MM-DD" -> UTC midnight
+    const utcMidnight = Date.parse(d.date)
     const utcNoon = utcMidnight + 12 * 60 * 60 * 1000
     const diff = Math.abs(utcNoon - t)
     if (diff < bestDiff) { bestDiff = diff; best = d }
@@ -42,17 +42,49 @@ function pickNearestDaily(wx, startISO) {
 const codeToEmoji = (c) => {
   if (c == null) return '❔'
   if ([0].includes(c)) return '☀️'
-  if ([1,2].includes(c)) return '🌤️'
+  if ([1, 2].includes(c)) return '🌤️'
   if ([3].includes(c)) return '☁️'
-  if ([45,48].includes(c)) return '🌫️'
-  if ([51,53,55].includes(c)) return '🌦️'
-  if ([61,63,65,80,81,82].includes(c)) return '🌧️'
-  if ([71,73,75,85,86].includes(c)) return '❄️'
-  if ([95,96,99].includes(c)) return '⛈️'
+  if ([45, 48].includes(c)) return '🌫️'
+  if ([51, 53, 55].includes(c)) return '🌦️'
+  if ([61, 63, 65, 80, 81, 82].includes(c)) return '🌧️'
+  if ([71, 73, 75, 85, 86].includes(c)) return '❄️'
+  if ([95, 96, 99].includes(c)) return '⛈️'
   return '❔'
 }
 
-export default function JobCard({ job, paydayThreshold = 2500, onClick, onMapClick, isSelected }) {
+function addrToString(a) {
+  if (!a) return ''
+  if (typeof a === 'string') return a
+  const parts = [
+    a.fullAddress || a.full_address,
+    [a.address, a.city, a.state, a.postalCode].filter(Boolean).join(', ')
+  ].filter(Boolean)
+  return parts[0] || ''
+}
+
+function normalizeContact(raw = {}) {
+  const phonesArr = Array.isArray(raw.phones) ? raw.phones : []
+  const emailsArr = Array.isArray(raw.emails) ? raw.emails : []
+  const phones = [...phonesArr, raw.phone, raw.mobile, raw.primaryPhone].filter(Boolean)
+  const emails = [...emailsArr, raw.email, raw.primaryEmail].filter(Boolean)
+  return {
+    ...raw,
+    name: raw.name ?? raw.fullName ?? raw.firstName ?? '—',
+    phones,
+    emails,
+  }
+}
+
+export default function JobCard({
+  job,                      // object from /api/week-appointments
+  paydayThreshold = 2500,
+  onOpen,                   // (job) => void
+  onMapClick,               // (job) => void (optional)
+  isSelected,               // boolean
+}) {
+  // normalize contact for reliable phones/emails/name
+  const c = normalizeContact(job?.contact || {})
+
   const value = useMemo(() => {
     const raw =
       job?.estValue ??
@@ -85,13 +117,9 @@ export default function JobCard({ job, paydayThreshold = 2500, onClick, onMapCli
     job?.start_iso ||
     null
 
-  // match forecast to job date or fallback to first day
   let dayWx = null
-  if (startISO) {
-    dayWx = pickNearestDaily(wx, startISO)
-  } else if (wx?.daily?.length) {
-    dayWx = wx.daily[0]
-  }
+  if (startISO) dayWx = pickNearestDaily(wx, startISO)
+  else if (wx?.daily?.length) dayWx = wx.daily[0]
 
   function toF(c) {
     if (c == null || isNaN(c)) return null
@@ -115,6 +143,9 @@ export default function JobCard({ job, paydayThreshold = 2500, onClick, onMapCli
   const TypeIcon =
     job?.jobType === 'Inspection' ? Search : job?.jobType === 'Install' ? Package : Wrench
 
+  const displayAddress =
+    addrToString(job?.address) || addrToString(c.address)
+
   return (
     <div
       className={[
@@ -122,7 +153,7 @@ export default function JobCard({ job, paydayThreshold = 2500, onClick, onMapCli
         isSelected ? 'ring-2 ring-sky-400/80 bg-white/[0.03]' : 'ring-1 ring-white/10',
         'hover:translate-y-[-1px] hover:ring-white/30',
       ].join(' ')}
-      onClick={onClick}
+      onClick={() => onOpen?.(job)}
       role="button"
       aria-label={`Open job ${job?.id}`}
     >
@@ -168,7 +199,7 @@ export default function JobCard({ job, paydayThreshold = 2500, onClick, onMapCli
       {/* address */}
       <div className="mt-1 flex items-start gap-1.5 text-sm text-white/80">
         <MapPin size={14} className="mt-0.5 opacity-70" />
-        <span className="line-clamp-2">{job?.address || '—'}</span>
+        <span className="line-clamp-2">{displayAddress || '—'}</span>
       </div>
 
       {/* chips */}
@@ -186,12 +217,12 @@ export default function JobCard({ job, paydayThreshold = 2500, onClick, onMapCli
       {/* footer */}
       <div className="mt-3 flex items-center justify-between border-t border-white/10 pt-2">
         <div className="text-xs text-white/70 truncate">
-          {job?.contact?.name || '—'}
+          {c.name || '—'}
         </div>
         <div className="flex items-center gap-2">
-          {job?.contact?.phones?.[0] && (
+          {c.phones?.[0] && (
             <a
-              href={`tel:${job.contact.phones[0]}`}
+              href={`tel:${c.phones[0]}`}
               onClick={(e) => e.stopPropagation()}
               className="text-xs inline-flex items-center gap-1 px-2 py-1 rounded bg-white/10 hover:bg-white/20"
             >
@@ -202,8 +233,8 @@ export default function JobCard({ job, paydayThreshold = 2500, onClick, onMapCli
             onClick={(e) => {
               e.stopPropagation()
               if (onMapClick) onMapClick(job)
-              else if (job?.address) {
-                const q = encodeURIComponent(job.address)
+              else if (displayAddress) {
+                const q = encodeURIComponent(displayAddress)
                 window.open(`https://www.google.com/maps/search/?api=1&query=${q}`, '_blank')
               }
             }}

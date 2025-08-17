@@ -15,13 +15,12 @@ export default function JobListByDay({
   jobs = [],
   paydayThreshold = 2500,
   selectedJobId,          // used to highlight/scroll
-  onSelect,               // <-- expects a JOB OBJECT
-  onMap,
+  onSelect,               // expects a JOB OBJECT; parent opens JobDetails
+  onMap,                  // optional: (job) => void
 }) {
-  // stable id getter
   const getId = (j) => j?.appointmentId || j?.id
 
-  // optional: de-dupe if your API can double-return
+  // De-dupe defensively
   const uniqJobs = useMemo(() => {
     const seen = new Set()
     const out = []
@@ -53,7 +52,6 @@ export default function JobListByDay({
   const [open, setOpen] = useState(() =>
     Object.fromEntries(Object.keys(grouped).map((k) => [k, true]))
   )
-
   useEffect(() => {
     setOpen(Object.fromEntries(Object.keys(grouped).map((k) => [k, true])))
   }, [grouped])
@@ -107,7 +105,7 @@ export default function JobListByDay({
                           job={job}
                           paydayThreshold={paydayThreshold}
                           isSelected={id === selectedJobId}
-                          onClick={() => onSelect?.(job)}    
+                          onOpen={() => onSelect?.(job)}
                           onMapClick={() => onMap?.(job)}
                         />
                       </div>
