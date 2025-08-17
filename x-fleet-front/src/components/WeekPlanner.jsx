@@ -12,7 +12,7 @@ const fallbackWeek = [
   { id:'J-501', day:'Thu', time:'10:00 AM', address:'Oak St, Phoenix', lat:33.46, lng:-112.02, jobType:'Inspection', estValue:0, territory:'EAST' }
 ]
 
-export default function WeekPlanner({ selectedJobId, onSelectJob }) {
+export default function WeekPlanner({ onSelectJob, selectedJobId, refreshToken }) {
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(null)
@@ -22,30 +22,31 @@ export default function WeekPlanner({ selectedJobId, onSelectJob }) {
   const [openSeed, setOpenSeed] = useState(null)
   const useLocalDrawer = !onSelectJob
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const r = await fetch(`${API_BASE}/api/week-appointments`)
-        if (!r.ok) throw new Error('no api')
-        const data = await r.json()
-        const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
-        const normalized = (data || []).map(j => {
-          const d = new Date(j.startTime || Date.now())
-          return {
-            ...j,
-            day: j.day || d.toLocaleDateString(undefined, { weekday: 'short', timeZone: tz }),
-            time: j.time || d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', timeZone: tz }),
-            dateText: j.dateText || d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: tz }),
-          }
-        })
-        setItems(normalized.length ? normalized : fallbackWeek)
-      } catch {
-        setItems(fallbackWeek)
-      } finally {
-        setLoading(false)
-      }
-    })()
-  }, [])
+useEffect(() => {
+  setLoading(true)
+  ;(async () => {
+    try {
+      const r = await fetch(`${API_BASE}/api/week-appointments`)
+      if (!r.ok) throw new Error('no api')
+      const data = await r.json()
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
+      const normalized = (data || []).map(j => {
+        const d = new Date(j.startTime || Date.now())
+        return {
+          ...j,
+          day: j.day || d.toLocaleDateString(undefined, { weekday: 'short', timeZone: tz }),
+          time: j.time || d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', timeZone: tz }),
+          dateText: j.dateText || d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: tz }),
+        }
+      })
+      setItems(normalized.length ? normalized : fallbackWeek)
+    } catch {
+      setItems(fallbackWeek)
+    } finally {
+      setLoading(false)
+    }
+  })()
+}, [refreshToken])
 
   // client settings (for payday badge)
   const [settings, setSettings] = useState({ paydayThreshold: 2500 })

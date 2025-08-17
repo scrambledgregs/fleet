@@ -4,17 +4,24 @@ import AlertList from './AlertList.jsx'
 import Inbox from './Inbox.jsx'
 import Vehicles from './Vehicles.jsx'
 import WeekPlanner from './WeekPlanner.jsx'
+import ContactsPanel from './ContactsPanel'
 import JobListByDay from './JobListByDay'
 import { API_BASE } from '../config'
 
-export default function LeftPanel({ mode, selectedJobId, onSelectJob }) {
-  const [tab, setTab] = useState('planner')            // 'planner' | 'alerts' | 'chatter' | 'vehicles'
-  const [plannerView, setPlannerView] = useState('byday') // 'byday' | 'byweek'
+export default function LeftPanel({ mode, selectedJobId, onSelectJob, tab: externalTab }) {
+  // Tab state: allow external control, fallback to local
+  const [tabLocal, setTabLocal] = useState('planner')
+  const tab = externalTab ?? tabLocal
+  const setTab = setTabLocal
+
+  // Planner view state (By Day / By Week)
+  const [plannerView, setPlannerView] = useState('byday')
 
   // week-appointments data for the By Day view
   const [jobs, setJobs] = useState([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [reloadKey, setReloadKey] = useState(0)
 
   const fetchJobs = useCallback(async () => {
     setError('')
@@ -43,59 +50,63 @@ export default function LeftPanel({ mode, selectedJobId, onSelectJob }) {
     return jobs.find(j => (j.id || j.appointmentId) === selectedJobId) || null
   }, [jobs, selectedJobId])
 
-  const TabBtn = ({ id, label }) => (
-    <button
-      onClick={() => setTab(id)}
-      className={[
-        'px-3 py-1.5 rounded text-xs transition',
-        tab === id ? 'bg-white/10 text-white' : 'text-white/70 hover:bg-white/5'
-      ].join(' ')}
-      aria-pressed={tab === id}
-    >
-      {label}
-    </button>
-  )
-
-  const SegBtn = ({ id, label }) => (
-    <button
-      onClick={() => setPlannerView(id)}
-      className={[
-        'px-2 py-0.5 text-[11px] rounded transition',
-        plannerView === id ? 'bg-white/10 text-white' : 'text-white/70 hover:bg-white/5'
-      ].join(' ')}
-      aria-pressed={plannerView === id}
-    >
-      {label}
-    </button>
-  )
-
   return (
     <div className="h-full flex flex-col">
+     
+     
+
       {/* Header */}
       <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-1.5">
-          <TabBtn id="planner" label="Jobs" />
-          <TabBtn id="alerts" label="AI Alerts" />
-          <TabBtn id="chatter" label="Chatter" />
-          <TabBtn id="vehicles" label="Vehicles" />
+        <div className="text-sm font-semibold">
+          {tab === 'planner'
+            ? 'Jobs'
+            : tab === 'contacts'
+            ? 'Contacts'
+            : tab === 'alerts'
+            ? 'AI Alerts'
+            : tab === 'chatter'
+            ? 'Chatter'
+            : 'Vehicles'}
         </div>
 
         {/* View toggle only on Jobs */}
         {tab === 'planner' && (
           <div className="flex items-center gap-2">
             <div className="hidden sm:flex items-center gap-1 rounded bg-white/5 p-0.5">
-              <SegBtn id="byday" label="By Day" />
-              <SegBtn id="byweek" label="By Week" />
-            </div>
-            {plannerView === 'byday' && (
               <button
-                onClick={fetchJobs}
-                className="text-[11px] px-2 py-1 rounded bg-white/5 hover:bg-white/10 transition"
-                title="Refresh jobs"
+                onClick={() => setPlannerView('byday')}
+                className={[
+                  'px-2 py-0.5 text-[11px] rounded transition',
+                  plannerView === 'byday' ? 'bg-white/10 text-white' : 'text-white/70 hover:bg-white/5',
+                ].join(' ')}
               >
-                Refresh
+                By Day
               </button>
-            )}
+              <button
+                onClick={() => setPlannerView('byweek')}
+                className={[
+                  'px-2 py-0.5 text-[11px] rounded transition',
+                  plannerView === 'byweek' ? 'bg-white/10 text-white' : 'text-white/70 hover:bg-white/5',
+                ].join(' ')}
+              >
+                By Week
+              </button>
+            </div>
+           
+          <button
+  onClick={() => {
+    if (plannerView === 'byday') {
+      fetchJobs()
+    } else {
+      setReloadKey((k) => k + 1)
+    }
+  }}
+  className="text-[11px] px-2 py-1 rounded bg-white/5 hover:bg-white/10 transition"
+  title="Refresh"
+>
+  Refresh
+</button>
+
           </div>
         )}
       </div>
@@ -105,9 +116,10 @@ export default function LeftPanel({ mode, selectedJobId, onSelectJob }) {
         {tab === 'planner' ? (
           plannerView === 'byweek' ? (
             <WeekPlanner
-              onSelectJob={(job) => onSelectJob?.(job)}   // ← propagate to right-side panel
-              selectedJobId={selectedJobId}
-            />
+  refreshToken={reloadKey}
+  onSelectJob={(job) => onSelectJob?.(job)}
+  selectedJobId={selectedJobId}
+/>
           ) : (
             <div className="p-1">
               {loading && (
@@ -139,14 +151,16 @@ export default function LeftPanel({ mode, selectedJobId, onSelectJob }) {
                 <JobListByDay
                   jobs={jobs}
                   selectedJobId={selectedJobId}
-                  onSelect={(job) => onSelectJob?.(job)}                 // open right-side panel
-                  onMap={(job) => onSelectJob?.(job)}                    // map click also selects
+                  onSelect={(job) => onSelectJob?.(job)}    // open right-side panel
+                  onMap={(job) => onSelectJob?.(job)}       // map click also selects
                 />
               )}
             </div>
           )
         ) : tab === 'alerts' ? (
           <AlertList mode={mode} />
+        ) : tab === 'contacts' ? (
+          <ContactsPanel />
         ) : tab === 'chatter' ? (
           <Inbox />
         ) : (

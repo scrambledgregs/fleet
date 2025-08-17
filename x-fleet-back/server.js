@@ -14,7 +14,6 @@ import {
   updateAppointmentOwner,
   rescheduleAppointment,
   appendAppointmentNotes,
-  updateContactCustomFields,
   createAppointmentV2,
 } from './lib/ghl.js';
 
@@ -207,6 +206,85 @@ app.post('/api/clear-jobs', (req, res) => {
   jobsByClient.set(clientId, new Map());
   res.json({ ok: true, message: `Jobs cleared for ${clientId}` })
 })
+
+// NEW: aggregate contacts from current jobs in memory
+app.get('/api/contacts', (req, res) => {
+  try {
+    const clientId = (req.query.clientId || 'default').trim();
+    const jobs = jobsByClient.get(clientId) || new Map();
+
+    const map = new Map(); // contactId -> summary
+    for (const j of jobs.values()) {
+      const c = normalizeContact(j.contact || {});
+      if (!c.id) continue;
+
+      const cur = map.get(c.id) || {
+        id: c.id,
+        name: c.name,
+        company: c.company || null,
+        phones: [],
+        emails: [],
+        address: c.address || null,
+        tags: c.tags || [],
+        lastAppointmentAt: null,
+        appointments: 0,
+      };
+
+      // merge phones/emails uniquely
+      const uniq = (a) => Array.from(new Set(a.filter(Boolean)));
+      cur.phones = uniq([...cur.phones, ...(c.phones || [])]);
+      cur.emails = uniq([...cur.emails, ...(c.emails || [])]);
+
+      // last appt + count
+      cur.appointments += 1;
+      const t = new Date(j.startTime || 0).getTime();
+      const prev = new Date(cur.lastAppointmentAt || 0).getTime();
+      if (t > prev) cur.lastAppointmentAt = j.startTime || cur.lastAppointmentAt;
+
+      map.set(c.id, cur);
+    }
+
+    const list = Array.from(map.values())
+      .sort((a, b) => new Date(b.lastAppointmentAt || 0) - new Date(a.lastAppointmentAt || 0));
+
+    res.json({ ok: true, clientId, count: list.length, contacts: list });
+  } catch (e) {
+    console.error('[contacts index]', e);
+    res.status(500).json({ ok: false, error: 'failed to build contacts list' });
+  }
+});
+
+// List all appointments for a given contact (uses in-memory jobs store)
+app.get('/api/contacts/:contactId/appointments', (req, res) => {
+  try {
+    const clientId  = (req.query.clientId || 'default').trim();
+    const contactId = req.params.contactId?.trim();
+    if (!contactId) return res.status(400).json({ ok:false, error:'contactId required' });
+
+    const jobsMap = jobsByClient.get(clientId) || new Map();
+
+    const list = Array.from(jobsMap.values())
+      .filter(j => {
+        const id = j?.contact?.id || j?.contactId;
+        return id && id === contactId;
+      })
+      .map(j => ({
+        appointmentId: j.appointmentId,
+        startTime: j.startTime,
+        endTime: j.endTime,
+        address: j.address,
+        jobType: j.jobType,
+        estValue: Number(j.estValue) || 0,
+        territory: j.territory || null,
+      }))
+      .sort((a, b) => new Date(b.startTime) - new Date(a.startTime)); // newest first
+
+    res.json({ ok:true, contactId, count: list.length, appointments: list });
+  } catch (e) {
+    console.error('[contacts:appointments]', e);
+    res.status(500).json({ ok:false, error:'failed to load contact appointments' });
+  }
+});
 
 app.get('/api/week-appointments', async (req, res) => {
   try {
