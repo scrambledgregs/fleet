@@ -7,6 +7,9 @@ import cors from 'cors';
 import fetch from 'node-fetch';
 import axios from 'axios'; 
 import { scoreAllReps } from './lib/fit.js';
+import { handleIncomingSMS, sendSMS } from './lib/twilio.js'
+import twilio from 'twilio';
+const { twiml } = twilio; // for VoiceResponse
 
 import {
   getContact,
@@ -206,6 +209,73 @@ app.post('/api/clear-jobs', (req, res) => {
   jobsByClient.set(clientId, new Map());
   res.json({ ok: true, message: `Jobs cleared for ${clientId}` })
 })
+
+// Twilio inbound SMS webhook
+app.post('/twilio/sms', express.urlencoded({ extended: false }), (req, res) => {
+  const { From, Body, To } = req.body || {};
+
+  // log inbound into the in-memory thread
+  recordSms({
+    to: To,
+    from: From,
+    direction: 'inbound',
+    text: Body,
+  });
+
+  // push to any connected UIs
+  io.emit('sms:inbound', { from: From, to: To, text: Body, at: new Date().toISOString() });
+
+  // send your auto-reply
+  return handleIncomingSMS(req, res);
+});
+
+// Twilio inbound voice webhook
+app.post('/twilio/voice', express.urlencoded({ extended: false }), (req, res) => {
+  const response = new twiml.VoiceResponse();
+  response.say('Thanks for calling Nonstop Automation Dispatch.');
+  res.type('text/xml');
+  res.send(response.toString());
+});
+
+// --- Minimal SMS out + in-memory thread log ---
+const smsThreads = new Map(); // key = phone, value = [{ direction, text, at, to, from }]
+
+function recordSms({ to, from, direction, text }) {
+  const peerRaw = direction === 'outbound' ? to : from;
+  const peer = normalizePhone(peerRaw);        // <-- normalize
+  const arr = smsThreads.get(peer) || [];
+  arr.push({ direction, text, at: new Date().toISOString(), to, from });
+  smsThreads.set(peer, arr);
+}
+
+// Send an SMS: POST /api/sms/send  { "to":"+1XXXXXXXXXX", "text":"hello" }
+app.post('/api/sms/send', async (req, res) => {
+  try {
+    const { to, text } = req.body || {};
+    if (!to || !text) return res.status(400).json({ ok: false, error: 'to and text required' });
+
+    const resp = await sendSMS(to, text);
+
+    recordSms({
+      to,
+      from: process.env.TWILIO_PHONE_NUMBER || '',
+      direction: 'outbound',
+      text,
+    });
+
+    io.emit('sms:outbound', { sid: resp.sid, to, text, at: new Date().toISOString() });
+    res.json({ ok: true, sid: resp.sid });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.message || 'send failed' });
+  }
+});
+
+// Fetch a thread: GET /api/sms/thread?phone=+1XXXXXXXXXX
+app.get('/api/sms/thread', (req, res) => {
+  const phone = normalizePhone((req.query.phone || '').trim()); // normalize!
+  if (!phone) return res.status(400).json({ ok: false, error: 'phone required' });
+  res.json({ ok: true, phone, messages: smsThreads.get(phone) || [] });
+});
 
 // NEW: aggregate contacts from current jobs in memory
 app.get('/api/contacts', (req, res) => {
