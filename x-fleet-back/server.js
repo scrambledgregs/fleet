@@ -1,19 +1,20 @@
-import 'dotenv/config'; // ✅ loads .env automatically in ESM
+import 'dotenv/config';
 
 import express from 'express';
 import http from 'http';
 import { Server as SocketIOServer } from 'socket.io';
 import cors from 'cors';
 import fetch from 'node-fetch';
-import axios from 'axios'; 
-import { scoreAllReps } from './lib/fit.js';
-import { handleIncomingSMS, sendSMS } from './lib/twilio.js'
+import axios from 'axios';
 import twilio from 'twilio';
 const { twiml } = twilio; // for VoiceResponse
+import { scoreAllReps } from './lib/fit.js';
+import { sendSMS } from './lib/twilio.js';
+import { handleInbound as agentHandle, setAutopilot, getState } from './lib/agent.js';
 
 import {
   getContact,
-  createContact, // ✅ add this
+  createContact,
   updateAppointmentOwner,
   rescheduleAppointment,
   appendAppointmentNotes,
@@ -97,6 +98,129 @@ app.use((req, _res, next) => {
   }
   next()
 })
+
+// Toggle agent autopilot for a phone
+app.post('/api/agent/autopilot', (req, res) => {
+  const phone = (req.body?.phone || '').trim();
+  const enabled = !!req.body?.enabled;
+  if (!phone) return res.status(400).json({ ok:false, error:'phone required' });
+  const state = setAutopilot(phone, enabled);
+  res.json({ ok:true, phone, state });
+});
+
+// Send an SMS manually (for operator console)
+app.post('/api/sms/send', async (req, res) => {
+  try {
+    const to = normalizePhone(String(req.body?.to || ''));
+    const text = String(req.body?.text || '').slice(0, 500);
+    if (!to || !text) return res.status(400).json({ ok:false, error:'to and text required' });
+
+    const resp = await sendSMS(to, text);
+    // log + broadcast just like the agent does
+    recordSms({ to, from: process.env.TWILIO_FROM || 'operator', direction: 'outbound', text });
+    io.emit('sms:outbound', { sid: resp.sid, to, text, at: new Date().toISOString() });
+
+    res.json({ ok:true, sid: resp.sid });
+  } catch (e) {
+    console.error('[api/sms/send]', e?.message || e);
+    res.status(500).json({ ok:false, error:'send failed' });
+  }
+});
+
+// Super-minimal operator console
+app.get('/admin', (_req, res) => {
+  res.type('html').send(`
+<!doctype html>
+<meta charset="utf-8"/>
+<title>SDC Console</title>
+<style>
+  body{font:14px system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;margin:24px}
+  .row{display:flex;gap:12px;align-items:center;margin:8px 0}
+  #log{border:1px solid #ddd;padding:8px;height:320px;overflow:auto;white-space:pre-wrap;background:#fafafa}
+  input,button{padding:8px}
+</style>
+<div class="row">
+  <input id="phone" placeholder="Peer phone e.g. +15164560637" style="width:260px">
+  <button id="load">Load thread</button>
+  <label><input type="checkbox" id="auto"> Autopilot</label>
+  <button id="saveAuto">Save</button>
+</div>
+<div id="log">—</div>
+<div class="row">
+  <input id="text" placeholder="Type a reply…" style="flex:1">
+  <button id="send">Send SMS</button>
+</div>
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const sock = io();
+const $ = id=>document.getElementById(id);
+const log = m => { const el=$('log'); el.textContent += "\\n" + m; el.scrollTop = el.scrollHeight; };
+
+$('load').onclick = async () => {
+  const phone = $('phone').value.trim();
+  if (!phone) return;
+  const r = await fetch('/api/sms/thread?phone=' + encodeURIComponent(phone));
+  const j = await r.json();
+  $('log').textContent = '';
+  (j.messages || []).forEach(m => log(\`[\${m.at}] \${m.direction.toUpperCase()}: \${m.text}\`));
+  const s = await fetch('/api/agent/state?phone=' + encodeURIComponent(phone));
+  const sj = await s.json();
+  $('auto').checked = !!sj?.state?.autopilot;
+};
+
+$('saveAuto').onclick = async () => {
+  const phone = $('phone').value.trim();
+  const enabled = $('auto').checked;
+  if (!phone) return;
+  const r = await fetch('/api/agent/autopilot', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ phone, enabled })
+  });
+  const j = await r.json();
+  log('AUTOPILOT -> ' + (j?.state?.autopilot ? 'ON' : 'OFF'));
+};
+
+$('send').onclick = async () => {
+  const phone = $('phone').value.trim();
+  const text = $('text').value;
+  if (!phone || !text) return;
+  const r = await fetch('/api/sms/send', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ to: phone, text })
+  });
+  const j = await r.json();
+  if (j.ok) { $('text').value=''; log('OUTBOUND: ' + text); }
+  else { log('ERROR sending'); }
+};
+
+// live updates
+sock.on('sms:inbound', m => {
+  const phone = $('phone').value.trim();
+  if (!phone || m.from !== phone) return;
+  log(\`[\${m.at}] INBOUND: \${m.text}\`);
+});
+sock.on('sms:outbound', m => {
+  const phone = $('phone').value.trim();
+  if (!phone || m.to !== phone) return;
+  log(\`[\${m.at}] OUTBOUND: \${m.text}\`);
+});
+</script>
+`);
+});
+
+// Get current agent state for a phone
+app.get('/api/agent/state', (req, res) => {
+  const phone = (req.query.phone || '').trim();
+  if (!phone) return res.status(400).json({ ok:false, error:'phone required' });
+  res.json({ ok:true, phone, state: getState(phone) });
+});
+
+// Fetch SMS thread (normalize the key)
+app.get('/api/sms/thread', (req, res) => {
+  const phone = normalizePhone((req.query.phone || '').trim());
+  if (!phone) return res.status(400).json({ ok:false, error:'phone required' });
+  res.json({ ok:true, phone, messages: smsThreads.get(phone) || [] });
+});
 
 // put near the top of server.js
 function normalizeContact(raw = {}) {
@@ -210,71 +334,47 @@ app.post('/api/clear-jobs', (req, res) => {
   res.json({ ok: true, message: `Jobs cleared for ${clientId}` })
 })
 
-// Twilio inbound SMS webhook
-app.post('/twilio/sms', express.urlencoded({ extended: false }), (req, res) => {
-  const { From, Body, To } = req.body || {};
-
-  // log inbound into the in-memory thread
-  recordSms({
-    to: To,
-    from: From,
-    direction: 'inbound',
-    text: Body,
-  });
-
-  // push to any connected UIs
-  io.emit('sms:inbound', { from: From, to: To, text: Body, at: new Date().toISOString() });
-
-  // send your auto-reply
-  return handleIncomingSMS(req, res);
-});
-
-// Twilio inbound voice webhook
-app.post('/twilio/voice', express.urlencoded({ extended: false }), (req, res) => {
-  const response = new twiml.VoiceResponse();
-  response.say('Thanks for calling Nonstop Automation Dispatch.');
-  res.type('text/xml');
-  res.send(response.toString());
-});
-
-// --- Minimal SMS out + in-memory thread log ---
-const smsThreads = new Map(); // key = phone, value = [{ direction, text, at, to, from }]
+// --- Minimal SMS log (grouped by peer phone) ---
+const smsThreads = new Map(); // key = normalized phone, value = [{ direction, text, at, to, from }]
 
 function recordSms({ to, from, direction, text }) {
   const peerRaw = direction === 'outbound' ? to : from;
-  const peer = normalizePhone(peerRaw);        // <-- normalize
+  const peer = normalizePhone(peerRaw);
   const arr = smsThreads.get(peer) || [];
   arr.push({ direction, text, at: new Date().toISOString(), to, from });
   smsThreads.set(peer, arr);
 }
 
-// Send an SMS: POST /api/sms/send  { "to":"+1XXXXXXXXXX", "text":"hello" }
-app.post('/api/sms/send', async (req, res) => {
+// Twilio inbound SMS webhook
+app.post('/twilio/sms', express.urlencoded({ extended: false }), async (req, res) => {
+  const { From, Body, To } = req.body || {};
+
+  // Log inbound into the in-memory thread
+  recordSms({ to: To, from: From, direction: 'inbound', text: Body });
+
+  // Push to UI
+  io.emit('sms:inbound', { from: From, to: To, text: Body, at: new Date().toISOString() });
+
   try {
-    const { to, text } = req.body || {};
-    if (!to || !text) return res.status(400).json({ ok: false, error: 'to and text required' });
-
-    const resp = await sendSMS(to, text);
-
-    recordSms({
-      to,
-      from: process.env.TWILIO_PHONE_NUMBER || '',
-      direction: 'outbound',
-      text,
+    // Hand off to the agent. It will call `send()` to reply if autopilot is ON.
+    await agentHandle({
+      from: From,
+      to: To,
+      text: Body,
+      send: async (toPhone, replyText) => {
+        const resp = await sendSMS(toPhone, replyText);
+        recordSms({ to: toPhone, from: To, direction: 'outbound', text: replyText });
+        io.emit('sms:outbound', { sid: resp.sid, to: toPhone, text: replyText, at: new Date().toISOString() });
+        return resp;
+      },
     });
 
-    io.emit('sms:outbound', { sid: resp.sid, to, text, at: new Date().toISOString() });
-    res.json({ ok: true, sid: resp.sid });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e?.message || 'send failed' });
+    // Tell Twilio the webhook was handled
+    res.type('text/xml').send('<Response/>');
+  } catch (err) {
+    console.error('[twilio/sms agent error]', err?.message || err);
+    res.type('text/xml').send('<Response/>');
   }
-});
-
-// Fetch a thread: GET /api/sms/thread?phone=+1XXXXXXXXXX
-app.get('/api/sms/thread', (req, res) => {
-  const phone = normalizePhone((req.query.phone || '').trim()); // normalize!
-  if (!phone) return res.status(400).json({ ok: false, error: 'phone required' });
-  res.json({ ok: true, phone, messages: smsThreads.get(phone) || [] });
 });
 
 // NEW: aggregate contacts from current jobs in memory
