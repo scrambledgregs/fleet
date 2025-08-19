@@ -9,6 +9,7 @@ import LeftPanel from './components/LeftPanel.jsx'
 import MapPanel from './components/MapPanel.jsx'
 import RequestAppointment from './pages/RequestAppointment.jsx'
 import JobDetails from './components/JobDetails.jsx'
+import Chatter from './pages/Chatter'
 
 function Dashboard({ mode, setMode, compact, setCompact }) {
   // selection for details drawer
@@ -74,6 +75,8 @@ export default function App() {
           element={<Dashboard mode={mode} setMode={setMode} compact={compact} setCompact={setCompact} />}
         />
         <Route path="/requestappointment" element={<RequestAppointment />} />
+        <Route path="/chatter" element={<Chatter />} />
+        <Route path="/chatter/:contactId" element={<Chatter />} />
       </Routes>
     </Router>
   )

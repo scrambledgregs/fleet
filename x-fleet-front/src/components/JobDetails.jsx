@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react'
 import { Phone, Mail, MapPin, Tag, Building2 } from 'lucide-react'
 import { API_BASE } from '../config'
+import { Link } from 'react-router-dom';
 
 // ---------- helpers ----------
 function addrToString(a) {
@@ -62,6 +63,8 @@ function normalizeJob(d = {}, seed = {}) {
     jobType: d.jobType ?? seed.jobType ?? 'Job',
     estValue: d.estValue ?? seed.estValue ?? 0,
     territory: d.territory ?? seed.territory ?? '—',
+    assignedUserId: d.assignedUserId ?? seed.assignedUserId ?? null,
+    assignedRepName: d.assignedRepName ?? seed.assignedRepName ?? null,
     travelMinutesFromPrev:
       typeof d.travelMinutesFromPrev === 'number'
         ? d.travelMinutesFromPrev
@@ -77,8 +80,8 @@ function normalizeJob(d = {}, seed = {}) {
 function Row({ label, children }) {
   return (
     <div className="flex items-start gap-2 text-sm">
-      <div className="min-w-24 text-white/60">{label}</div>
-      <div className="flex-1">{children}</div>
+  <div className="w-24 shrink-0 text-white/60">{label}</div>      
+  <div className="flex-1">{children}</div>
     </div>
   )
 }
@@ -88,7 +91,10 @@ export default function JobDetails({ jobId, seed, onClose }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [convo, setConvo] = useState({ loading: false, messages: null, error: null })
-
+  const assignedUserId  = data?.assignedUserId ?? null
+  const assignedRepName = data?.assignedRepName ?? null
+  const assignedLabel   = assignedRepName ?? (assignedUserId ? `#${assignedUserId}` : 'Unassigned')
+  
   // Load job; use the normalizer
   useEffect(() => {
     let alive = true
@@ -216,24 +222,30 @@ export default function JobDetails({ jobId, seed, onClose }) {
                 <div className="text-xs text-white/60">Contact</div>
                 <div className="text-base font-semibold">{c.name || '—'}</div>
               </div>
-              <div className="flex items-center gap-2">
-                {c.company && (
-                  <div className="text-xs text-white/70 flex items-center gap-2">
-                    <Building2 size={14} />
-                    {c.company}
-                  </div>
-                )}
-                <button
-                  onClick={openConversation}
-                  disabled={!c.id}
-                  className={`px-2 py-1 rounded-none glass text-xs ${
-                    c.id ? 'hover:bg-panel/70' : 'opacity-50 cursor-not-allowed'
-                  }`}
-                  title={c.id ? 'Open conversation' : 'No contact ID'}
-                >
-                  View Conversation
-                </button>
-              </div>
+<div className="flex items-center gap-2">
+  {c.company && (
+    <div className="text-xs text-white/70 flex items-center gap-2">
+      <Building2 size={14} />
+      {c.company}
+    </div>
+  )}
+
+ <Link
+  to={c.id ? `/chatter/${encodeURIComponent(c.id)}` : '#'}
+  onClick={(e) => {
+    if (!c.id) { e.preventDefault(); return; }
+    onClose?.();           // ← close drawer on nav
+  }}
+  className={`px-2 py-1 rounded-none glass text-xs ${c.id ? 'hover:bg-panel/70' : 'opacity-50 pointer-events-none'}`}
+  title={c.id ? 'Open conversation' : 'No contact ID'}
+>
+  View Conversation
+</Link>
+</div>
+
+
+
+              
             </div>
 
             <div className="mt-3 space-y-2">
@@ -370,6 +382,9 @@ export default function JobDetails({ jobId, seed, onClose }) {
             <div className="mt-1 text-sm">
               Territory: <span className="text-white/90">{data.territory}</span>
             </div>
+            <div className="mt-1 text-sm">
+            Assigned to: <span className="text-white/90">{assignedLabel}</span>
+           </div>
             <div className="mt-1 text-sm">
               Window:{' '}
               <span className="text-white/90">

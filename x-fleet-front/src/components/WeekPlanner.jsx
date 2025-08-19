@@ -179,6 +179,8 @@ useEffect(() => {
             key={id}
             job={job}
             paydayThreshold={settings?.paydayThreshold ?? 2500}
+            assignedUserId={row.assignedUserId}
+            assignedRepName={row.assignedRepName}
             isSelected={id === selectedJobId}
             busy={busy === id}
             onOpen={() => {

@@ -19,11 +19,12 @@ import {
   createAppointmentV2,
 } from './lib/ghl.js';
 import createChatterRouter from './routes/chatter.js';
-
+import { SuggestTimesRequestSchema, CreateAppointmentReqSchema, UpsertTechsRequestSchema } from './lib/schemas.js';
 
 const geocodeCache = new Map();
 const app = express()
 const server = http.createServer(app)
+const CHATTER_AI = process.env.CHATTER_AI === 'true';
 const io = new SocketIOServer(server, {
   cors: { origin: process.env.ALLOW_ORIGIN || '*', methods: ['GET','POST'] }
 })
@@ -82,6 +83,17 @@ async function getDriveMinutes(from, to) {
 const techsByClient = new Map(); // clientId -> tech array
 const jobsByClient  = new Map(); // clientId -> Map(appointmentId -> job)
 
+// Demo tech seeding
+const SHOULD_SEED_DEMO = process.env.SEED_DEMO_TECHS === 'true';
+function ensureDemoTechs(clientId = 'default') {
+  const cur = techsByClient.get(clientId) || [];
+  if (cur.length) return;
+  techsByClient.set(clientId, [
+    { id: 't1', name: 'Alice (demo)', skills: ['Repair'], territory: 'EAST', route: [] },
+    { id: 't2', name: 'Bob (demo)',   skills: ['Repair'], territory: 'EAST', route: [] },
+  ]);
+}
+
 // --- MOCK CONVERSATIONS (dev/testing) ---
 const mockConvos = new Map();      // conversationId -> { id, contactId, messages: [...] }
 const mockByContact = new Map();   // contactId -> conversationId
@@ -133,7 +145,20 @@ function normalizeContact(raw = {}) {
 // helper: very simple offset fallback (see NOTE)
 const TZ_DEFAULT = 'America/New_York';
 const TZ_OFFSET_FALLBACK = process.env.DEFAULT_TZ_OFFSET || '-04:00'; // EDT default
+// Suggest-times source: 'ghl' (default) or 'local' to avoid any GHL calls
+const SUGGEST_SLOTS_SOURCE = process.env.SUGGEST_SLOTS_SOURCE || 'ghl';
 
+// Local/mock free-slots generator (9–5 every 30m)
+function buildLocalSlots(date, stepMin = 30, open = '09:00', close = '17:00') {
+  const startISO = `${date}T${open}:00${TZ_OFFSET_FALLBACK}`;
+  const endISO   = `${date}T${close}:00${TZ_OFFSET_FALLBACK}`;
+  const out = [];
+  for (let t = new Date(startISO); t < new Date(endISO); t = new Date(t.getTime() + stepMin * 60000)) {
+    const end = new Date(t.getTime() + stepMin * 60000);
+    out.push({ start: t.toISOString(), end: end.toISOString() });
+  }
+  return out;
+}
 function extractSlotsFromGHL(data) {
   // Accept several shapes:
   // 1) { timeSlots: [...] } or { availableSlots: [...] } or { slots: [...] }
@@ -322,6 +347,10 @@ app.get('/api/week-appointments', async (req, res) => {
     const clientId = req.query.clientId || 'default';
     const jobsMap = jobsByClient.get(clientId) || new Map();
 
+     // 👇 Add this lookup
+    const techs = techsByClient.get(clientId) || [];
+    const nameById = new Map(techs.map(t => [t.id, t.name]));
+
     // normalize
     const items = Array.from(jobsMap.values()).map(j => {
       const d = j.startTime ? new Date(j.startTime) : new Date();
@@ -335,17 +364,18 @@ app.get('/api/week-appointments', async (req, res) => {
       const dateText = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 
       return {
-        id: j.appointmentId,
-        startTimeISO: d.toISOString(),
-        day, time, dateText,
-        address: toAddressString(j.address),
-        lat: j.lat, lng: j.lng,
-        jobType: j.jobType,
-        estValue: j.estValue,
-        territory: j.territory,
-        contact: j.contact,
-        travelMinutesFromPrev: null,
-      };
+  id: j.appointmentId,
+  startTimeISO: d.toISOString(),
+  day, time, dateText,
+  address: toAddressString(j.address),
+  lat: j.lat, lng: j.lng,
+  jobType: j.jobType,
+  estValue: j.estValue,
+  territory: j.territory,
+  contact: j.contact,
+  travelMinutesFromPrev: null,
+  assignedUserId: j.assignedUserId || null,   // ← add this
+};
     });
 
     // sort by time
@@ -385,7 +415,8 @@ app.get('/api/week-appointments', async (req, res) => {
       territory: it.territory,
       contact: it.contact,
       travelMinutesFromPrev: it.travelMinutesFromPrev,
-    }));
+      assignedUserId: it.assignedUserId || null,
+      assignedRepName: nameById.get(it.assignedUserId) || null,    }));
 
     res.json(out);
   } catch (e) {
@@ -521,45 +552,48 @@ app.get('/api/debug/calendar', async (req, res) => {
 // REPLACE your existing /api/suggest-times with this version
 app.post('/api/suggest-times', async (req, res) => {
   try {
-    const {
-      clientId = 'default',
-      date,                       // YYYY-MM-DD (required)
-      timezone = TZ_DEFAULT,
-      address,                    // new job address (helps routing)
-      jobType = 'Repair',
-      estValue = 0,
-      territory = 'EAST',
-      durationMin = 60,           // desired job length
-      bufferMin = 15,             // min setup/tear-down buffer
-      maxDetourMin = 60           // max total extra drive time you’ll accept
-    } = req.body;
+ const args = SuggestTimesRequestSchema.parse(req.body);
+const {
+  clientId,
+  date,
+  timezone,
+  address,
+  jobType,
+  estValue,
+  territory,
+  durationMin,
+  bufferMin,
+  maxDetourMin
+} = args;
+  const { startMs, endMs } = dayBoundsEpochMs(date, TZ_OFFSET_FALLBACK);
 
-    if (!date) return res.status(400).json({ ok:false, error:'date (YYYY-MM-DD) is required' });
+    // --- 1) Get free slots ---
+let freeSlots = [];
+if (SUGGEST_SLOTS_SOURCE === 'local') {
+  freeSlots = buildLocalSlots(date);
+} else {
+  const calendarId = process.env.GHL_CALENDAR_ID;
+  if (!calendarId || !process.env.GHL_ACCESS_TOKEN) {
+    return res.status(500).json({ ok:false, error:'GHL env vars missing' });
+  }
+  const base = 'https://services.leadconnectorhq.com';
+  const free = new URL(`/calendars/${calendarId}/free-slots`, base);
 
-    // --- 1) Get free slots from GHL ---
-    const calendarId = process.env.GHL_CALENDAR_ID;
-    if (!calendarId || !process.env.GHL_ACCESS_TOKEN) {
-      return res.status(500).json({ ok:false, error:'GHL env vars missing' });
-    }
-    const base = 'https://services.leadconnectorhq.com';
-    const free = new URL(`/calendars/${calendarId}/free-slots`, base);
+  free.searchParams.set('startDate', String(startMs));
+  free.searchParams.set('endDate',   String(endMs));
+  free.searchParams.set('timezone',  timezone);
 
-    const { startMs, endMs } = dayBoundsEpochMs(date, TZ_OFFSET_FALLBACK);
-    free.searchParams.set('startDate', String(startMs));
-    free.searchParams.set('endDate',   String(endMs));
-    free.searchParams.set('timezone',  timezone);
+  const { data } = await axios.get(free.toString(), {
+    headers: {
+      Authorization: `Bearer ${process.env.GHL_ACCESS_TOKEN}`,
+      Version: '2021-04-15',
+      Accept: 'application/json',
+    },
+    timeout: 15000,
+  });
 
-    const { data } = await axios.get(free.toString(), {
-      headers: {
-        Authorization: `Bearer ${process.env.GHL_ACCESS_TOKEN}`,
-        Version: '2021-04-15',
-        Accept: 'application/json',
-      },
-      timeout: 15000,
-    });
-
-    const freeSlots = extractSlotsFromGHL(data); // [{start,end}]
-
+  freeSlots = extractSlotsFromGHL(data);
+}
     // --- 2) Prepare the "new job" location (for travel calc) ---
     let newLoc = null;
     if (address) {
@@ -665,9 +699,16 @@ app.post('/api/suggest-times', async (req, res) => {
     return res.status(500).json({ ok:false, error: msg });
   }
 });
-// Create (or reuse) a mock conversation and add a message
-app.post('/api/mock/ghl/send-message', (req, res) => {
-  const { contactId, text = '', direction = 'outbound', channel = 'sms' } = req.body || {};
+ // server.js — replace your /api/mock/ghl/send-message route with this
+
+app.post('/api/mock/ghl/send-message', async (req, res) => {
+  const {
+    contactId,
+    text = '',
+    direction = 'outbound',
+    channel = 'sms',
+    autopilot
+  } = req.body || {};
   if (!contactId) return res.status(400).json({ ok:false, error:'contactId required' });
 
   let convoId = mockByContact.get(contactId);
@@ -676,24 +717,86 @@ app.post('/api/mock/ghl/send-message', (req, res) => {
     mockByContact.set(contactId, convoId);
     mockConvos.set(convoId, { id: convoId, contactId, messages: [] });
   }
+
   const convo = mockConvos.get(convoId);
   const msg = {
     id: uuid(),
-    direction,              // 'inbound' | 'outbound'
-    channel,                // 'sms' | 'email' | etc
+    direction,
+    channel,
     text,
     createdAt: new Date().toISOString(),
   };
   convo.messages.push(msg);
+
+  io.emit('sms:outbound', { sid: msg.id, contactId, text: msg.text, at: msg.createdAt });
+
+  (async () => {
+    if (direction !== 'outbound') return;
+
+    const useAI = typeof autopilot === 'boolean' ? autopilot : CHATTER_AI;
+
+    if (useAI) {
+      try {
+        await agentHandle({
+          from: `contact:${contactId}`,
+          to: 'chatter',
+          text,
+          send: async (_to, replyText) => {
+            const reply = {
+              id: uuid(),
+              direction: 'inbound',
+              channel,
+              text: replyText,
+              createdAt: new Date().toISOString(),
+            };
+            const c = mockConvos.get(convoId);
+            if (c) c.messages.push(reply);
+            io.emit('sms:inbound', {
+              sid: reply.id,
+              contactId,
+              text: reply.text,
+              at: reply.createdAt,
+            });
+            return { sid: reply.id };
+          },
+        });
+      } catch (e) {
+        console.warn('[agentHandle mock]', e?.message || e);
+      }
+    } else {
+      setTimeout(() => {
+        const replyText = `Auto-bot: thanks for your message — "${text}". How can I help further?`;
+        const reply = {
+          id: uuid(),
+          direction: 'inbound',
+          channel,
+          text: replyText,
+          createdAt: new Date().toISOString(),
+        };
+        const c = mockConvos.get(convoId);
+        if (c) c.messages.push(reply);
+        io.emit('sms:inbound', {
+          sid: reply.id,
+          contactId,
+          text: reply.text,
+          at: reply.createdAt,
+        });
+      }, 900);
+    }
+  })();
+
   return res.json({ ok:true, conversationId: convoId, message: msg });
 });
 
-// List mock conversations for a contact (if any)
 app.get('/api/mock/ghl/contact/:contactId/conversations', (req, res) => {
   const contactId = req.params.contactId;
   const convoId = mockByContact.get(contactId);
   if (!convoId) return res.json({ ok:true, contactId, conversations: [] });
-  return res.json({ ok:true, contactId, conversations: [{ id: convoId, unreadCount: 0, starred: false, type: 0 }] });
+  return res.json({
+    ok: true,
+    contactId,
+    conversations: [{ id: convoId, unreadCount: 0, starred: false, type: 0 }],
+  });
 });
 
 // List mock messages for a conversation
@@ -733,30 +836,35 @@ app.post('/api/client-settings', (req, res) => {
 });
 
 // ---- Book appointment and push to GHL ----
-// ---- Book appointment and push to GHL ----
-// ---- Book appointment and push to GHL ----
 async function handleBookAppointment(req, res) {
   try {
     console.log("[DEBUG] Incoming create-appointment payload:", req.body);
 
+    let args;
+    try {
+      args = CreateAppointmentReqSchema.parse(req.body);
+    } catch (e) {
+      return res.status(400).json({ ok:false, error:'Invalid request', details: e.errors ?? String(e) });
+    }
+
     const {
-      contact,                       // { name, phone, email } (optional if contactId provided)
+      contact,
       contactId: contactIdFromClient,
       address,
       lat,
       lng,
-      jobType = 'Repair',
-      estValue = 0,
-      territory = 'EAST',
+      jobType,
+      estValue,
+      territory,
       startTime,
       endTime,
-      timezone = 'America/New_York',
-      title = 'Service appointment',
-      notes = 'Booked by Dispatch Board',
+      timezone,
+      title,
+      notes,
       rrule,
       assignedUserId,
       clientId,
-    } = req.body;
+    } = args;
 
     if (!address || !startTime) {
       return res.status(400).json({
@@ -813,7 +921,7 @@ async function handleBookAppointment(req, res) {
       ? ensureOffsetISO(endTime)
       : new Date(new Date(startISO).getTime() + 60 * 60 * 1000).toISOString();
 
-    // Create appointment
+    // Create appointment in GHL
     const created = await createAppointmentV2({
       calendarId: process.env.GHL_CALENDAR_ID,
       contactId,
@@ -827,55 +935,142 @@ async function handleBookAppointment(req, res) {
       assignedUserId: assignedUserId || process.env.GHL_USER_ID,
     });
 
-    // --- ensure we have real coordinates for this address ---
-let latNum = Number(lat);
-let lngNum = Number(lng);
-const missingOrZero =
-  !Number.isFinite(latNum) || !Number.isFinite(lngNum) || (latNum === 0 && lngNum === 0);
+    // Ensure we have coordinates
+    let latNum = Number(lat);
+    let lngNum = Number(lng);
+    const missingOrZero =
+      !Number.isFinite(latNum) || !Number.isFinite(lngNum) || (latNum === 0 && lngNum === 0);
 
-if (missingOrZero && address) {
-  try {
-    const geo = await geocodeAddress(address);
-    if (geo) { latNum = geo.lat; lngNum = geo.lng; }
-  } catch (e) {
-    console.warn('[Geocode] create-appointment lookup failed:', e.message);
-  }
-}
+    if (missingOrZero && address) {
+      try {
+        const geo = await geocodeAddress(address);
+        if (geo) { latNum = geo.lat; lngNum = geo.lng; }
+      } catch (e) {
+        console.warn('[Geocode] create-appointment lookup failed:', e.message);
+      }
+    }
 
     // Store job locally
     const activeClientId = clientId || 'default';
     if (!jobsByClient.has(activeClientId)) jobsByClient.set(activeClientId, new Map());
     const jobs = jobsByClient.get(activeClientId);
 
-const job = {
-  appointmentId: created?.id || created?.appointmentId || 'ghl-unknown',
-  address,
-  lat: Number.isFinite(latNum) ? latNum : 0,
-  lng: Number.isFinite(lngNum) ? lngNum : 0,
-  startTime: startISO,
-  endTime: endISO,
-  jobType,
-  estValue: Number(estValue) || 0,
-  territory,
-  // ⬇️ normalize contact so frontend gets phones/emails arrays, etc.
-  contact: normalizeContact({ id: contactId, ...(contact || {}) }),
-};
+    const job = {
+      appointmentId: created?.id || created?.appointmentId || 'ghl-unknown',
+      address,
+      lat: Number.isFinite(latNum) ? latNum : 0,
+      lng: Number.isFinite(lngNum) ? lngNum : 0,
+      startTime: startISO,
+      endTime: endISO,
+      jobType,
+      estValue: Number(estValue) || 0,
+      territory,
+      contact: normalizeContact({ id: contactId, ...(contact || {}) }),
+    };
 
     jobs.set(job.appointmentId, job);
     io.emit('job:created', job);
 
-    return res.json({ ok: true, job });
+    // ---------------- AI ranking lives HERE ----------------
+    if (SHOULD_SEED_DEMO) ensureDemoTechs(activeClientId);
+    const techs = techsByClient.get(activeClientId) || [];
+    const reps = techs.map(t => ({
+      id: t.id, name: t.name, skills: t.skills, territory: t.territory, route: t.route
+    }));
+
+    let candidates = [];
+    try {
+      candidates = await scoreAllReps(job, reps);
+    } catch (e) {
+      console.warn('[AI score manual] failed:', e.message);
+    }
+
+    const mode = process.env.SDC_MODE || 'Approve';
+
+    if (mode === 'Auto' && candidates[0]) {
+      const best = candidates[0];
+      try {
+        await updateAppointmentOwner(job.appointmentId, best.repId);
+        await appendAppointmentNotes(
+          job.appointmentId,
+          `Booked by SDC AI • ${best.reason} • FIT=${best.total.toFixed(2)}`
+        );
+        io.emit('ai:booking', { clientId: activeClientId, job, decision: best });
+      } catch (e) {
+        console.warn('[Auto-assign/manual] failed:', e.message);
+      }
+    } else {
+      io.emit('ai:suggestion', { clientId: activeClientId, job, candidates });
+    }
+    // -------------------------------------------------------
+
+    // (nice for UI) return candidates too
+    return res.json({ ok: true, job, candidates });
   } catch (err) {
     console.error('[Book Appointment] Error:', err?.response?.data || err.message || err);
     return res.status(500).json({ ok: false, error: 'Server error' });
   }
 }
 
+// ---- Techs (simple admin endpoints) ----
+app.get('/api/techs', (req, res) => {
+  const clientId = (req.query.clientId || 'default').trim();
+  if (SHOULD_SEED_DEMO) ensureDemoTechs(clientId);
+  const techs = techsByClient.get(clientId) || [];
+  res.json({ ok: true, clientId, count: techs.length, techs });
+});
+
+app.post('/api/techs', (req, res) => {
+  try {
+    const { clientId, techs } = UpsertTechsRequestSchema.parse(req.body);
+    techsByClient.set(clientId, techs);
+    res.json({ ok: true, clientId, count: techs.length });
+  } catch (e) {
+    res.status(400).json({ ok:false, error:'Invalid payload', details: e.errors ?? String(e) });
+  }
+});
+
+// Approve & assign a candidate to an appointment
+app.post('/api/approve-assignment', async (req, res) => {
+  try {
+    const clientId = (req.body.clientId || 'default').trim();
+    const { appointmentId, repId } = req.body || {};
+    if (!appointmentId || !repId) {
+      return res.status(400).json({ ok:false, error:'appointmentId and repId are required' });
+    }
+
+    const techs = techsByClient.get(clientId) || [];
+    const rep = techs.find(t => t.id === repId);
+    if (!rep) return res.status(404).json({ ok:false, error:'rep not found for client' });
+
+    // Update in GHL
+    await updateAppointmentOwner(appointmentId, repId);
+
+    // Keep local state in sync
+    const jobs = jobsByClient.get(clientId) || new Map();
+    const job = jobs.get(appointmentId);
+    if (job) {
+      await rescheduleAppointment(appointmentId, job.startTime, job.endTime);
+      await appendAppointmentNotes(appointmentId, `Approved for ${rep.name} (${rep.id}) via Dispatch Board`);
+      job.assignedUserId = repId;
+      jobs.set(appointmentId, job);
+      io.emit('ai:booking', { clientId, job, decision: { repId: rep.id, repName: rep.name } });
+    }
+    
+
+    res.json({ ok:true, appointmentId, assignedTo: { id: rep.id, name: rep.name } });
+  } catch (e) {
+    console.error('[approve-assignment]', e?.response?.data || e.message);
+    res.status(500).json({ ok:false, error: e?.response?.data || e.message });
+  }
+});
+
 // ✅ Register the route AFTER defining the function
 app.post('/api/create-appointment', handleBookAppointment);
 app.post('/ghl/appointment-created', async (req, res) => {
   try {
     const clientId = req.query.clientId || req.body.clientId || 'default';
+    if (SHOULD_SEED_DEMO) ensureDemoTechs(clientId);
     const techs = techsByClient.get(clientId) || [];
     if (!jobsByClient.has(clientId)) jobsByClient.set(clientId, new Map());
     const jobs = jobsByClient.get(clientId);

@@ -15,7 +15,7 @@ export default function TopBar({ mode, setMode, compact, setCompact }) {
           <div className="h-8 w-8 rounded-none bg-accent/20 flex items-center justify-center">
             <Bolt className="text-accent" size={18} />
           </div>
-          <div className="font-semibold tracking-tight">Nonstop Dispatch</div>
+          <div className="font-semibold tracking-tight">NONSTOP JOBS</div>
         </div>
 
         {/* Actions */}

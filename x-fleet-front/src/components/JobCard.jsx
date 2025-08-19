@@ -1,5 +1,5 @@
 // components/JobCard.jsx
-import { Phone, MapPin, Wrench, Search, Package } from 'lucide-react'
+import { Phone, MapPin, Wrench, Search, Package, User } from 'lucide-react'
 import { useMemo } from 'react'
 import { useForecast } from '../hooks/useForecast'
 
@@ -82,6 +82,12 @@ export default function JobCard({
   onMapClick,               // (job) => void (optional)
   isSelected,               // boolean
 }) {
+
+    // assigned tech (from /api/week-appointments)
+  const assignedUserId = job?.assignedUserId ?? null
+  const assignedRepName = job?.assignedRepName ?? null
+  const assignedLabel = assignedRepName ?? (assignedUserId ? `#${assignedUserId}` : 'Unassigned')
+
   // normalize contact for reliable phones/emails/name
   const c = normalizeContact(job?.contact || {})
 
@@ -212,6 +218,9 @@ export default function JobCard({
             ⚡ Fit {job.fitScore.toFixed(1)}
           </span>
         )}
+        <span className="text-xs px-2 py-1 rounded bg-white/10 text-white/80 inline-flex items-center gap-1">
+      <User size={12} /> {assignedLabel}
+    </span>
       </div>
 
       {/* footer */}
