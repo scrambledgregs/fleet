@@ -33,7 +33,7 @@ export default function TopBar({ mode, setMode, compact, setCompact }) {
         body: JSON.stringify({ enabled: next }),
       })
     } catch {
-      // optional: revert on error
+      // optional rollback
       // setVoiceOn(v => !v)
     }
   }
@@ -62,22 +62,28 @@ export default function TopBar({ mode, setMode, compact, setCompact }) {
                 : "glass hover:bg-panel/70 text-white"
             ].join(' ')}
           >
-            Request Appointment
+            Book Job
           </Link>
-
-         {/* Voice AI toggle */}
-<button
-  onClick={() => toggleVoice(!voiceOn)}
-  className={
-    "flex items-center gap-2 px-2 py-1 rounded-md text-sm font-medium transition " +
-    (voiceOn
-      ? "bg-emerald-600 text-white hover:bg-emerald-500 shadow"
-      : "bg-zinc-700 text-zinc-200 hover:bg-zinc-600")
-  }
+          <Link
+  to="/settings"
+  className="glass hover:bg-panel/70 text-sm px-3 py-1.5 rounded-none"
 >
-  <span className="w-2 h-2 rounded-full bg-current"></span>
-  {voiceOn ? "Voice AI: ON" : "Voice AI: OFF"}
-</button>
+  Settings
+</Link>
+
+          {/* Voice AI toggle */}
+          <button
+            onClick={() => toggleVoice(!voiceOn)}
+            className={
+              "flex items-center gap-2 px-2 py-1 rounded-md text-sm font-medium transition " +
+              (voiceOn
+                ? "bg-emerald-600 text-white hover:bg-emerald-500 shadow"
+                : "bg-zinc-700 text-zinc-200 hover:bg-zinc-600")
+            }
+          >
+            <span className="w-2 h-2 rounded-full bg-current"></span>
+            {voiceOn ? "Voice AI: ON" : "Voice AI: OFF"}
+          </button>
 
           {/* Mode toggle */}
           <div className="text-sm text-white/60 hidden sm:block">Dispatch Mode</div>
@@ -98,6 +104,16 @@ export default function TopBar({ mode, setMode, compact, setCompact }) {
           >
             <span className="text-sm">{compact ? 'Compact: On' : 'Compact: Off'}</span>
           </button>
+
+          {/* Only show onboarding/signup link if not already there */}
+          {!(pathname.startsWith('/signup') || pathname.startsWith('/onboarding')) && (
+            <Link
+              to="/signup"
+              className="text-sm px-3 py-1.5 rounded-none glass hover:bg-panel/70"
+            >
+              Get Started
+            </Link>
+          )}
         </div>
       </div>
     </header>

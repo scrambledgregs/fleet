@@ -2,7 +2,7 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
 import AlertList from './AlertList.jsx'
 import Inbox from './Inbox.jsx'
-import Vehicles from './Vehicles.jsx'
+import Vehicles from './VehiclesPanel.jsx'
 import WeekPlanner from './WeekPlanner.jsx'
 import ContactsPanel from './ContactsPanel'
 import JobListByDay from './JobListByDay'

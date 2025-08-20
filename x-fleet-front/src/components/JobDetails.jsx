@@ -18,20 +18,30 @@ function addrToString(a) {
 
 function normalizeContact(raw = {}) {
   const id = raw.id ?? raw.contactId ?? raw._id ?? null
+
   const phonesArr = Array.isArray(raw.phones) ? raw.phones : []
   const extraPhones = [raw.phone, raw.mobile, raw.primaryPhone].filter(Boolean)
-  const phones = [...phonesArr, ...extraPhones].filter(Boolean)
+  const phones = [...phonesArr, ...extraPhones]
+    .filter(Boolean)
+    .map(String)
 
   const emailsArr = Array.isArray(raw.emails) ? raw.emails : []
-  const extraEmails = [raw.email, raw.primaryEmail].filter(Boolean)
-  const emails = [...emailsArr, ...extraEmails].filter(Boolean)
+  const extraEmails = [
+    raw.email,
+    raw.primaryEmail,
+    raw.contactEmail,
+    raw.primary_email,
+  ].filter(Boolean)
+  const emails = [...emailsArr, ...extraEmails]
+    .filter(Boolean)
+    .map(e => String(e).trim())
 
   return {
     id,
     name: raw.name ?? raw.fullName ?? raw.firstName ?? '—',
     company: raw.company || null,
-    phones,
-    emails,
+    phones: Array.from(new Set(phones)),
+    emails: Array.from(new Set(emails)),
     address: raw.address ?? null,
     tags: Array.isArray(raw.tags) ? raw.tags : [],
     custom: raw.custom || {},
@@ -41,21 +51,57 @@ function normalizeContact(raw = {}) {
 
 // Unify job shape; also pull contact fields from job root if present
 function normalizeJob(raw = {}, seed = {}) {
-  // NEW: unwrap { items: {...} } if present
-  const d = raw?.items ?? raw;
+  const d = raw?.items ?? raw
 
-  const startTime = d.startTime || seed.startTime || new Date().toISOString();
-  const endTime =
-    d.endTime || seed.endTime || new Date(Date.now() + 3600000).toISOString();
+  const startTime = d.startTime || seed.startTime || new Date().toISOString()
+  const endTime = d.endTime || seed.endTime || new Date(Date.now() + 3600000).toISOString()
 
+  // Pull any stray contact fields off the root/seed/customer
   const contactFromRoot = {
     id: d.contactId ?? seed.contactId,
     name: d.contactName ?? seed.contactName,
     phone: d.phone ?? d.contactPhone ?? seed.phone,
-    email: d.email ?? d.contactEmail ?? seed.email,
-  };
+    email:
+      d.email ??
+      d.contactEmail ??
+      seed.email ??
+      seed.contactEmail ??
+      d?.customer?.email ??
+      d?.customer?.primaryEmail,
+  }
 
-  const contact = normalizeContact({ ...(d.contact || {}), ...contactFromRoot });
+  const seedC = seed?.contact || {}
+  const dc = d.contact || {}
+  const cust = d.customer || {}
+
+  const merged = {
+    id: dc.id ?? seedC.id ?? contactFromRoot.id ?? cust.id ?? null,
+    name: dc.name ?? seedC.name ?? contactFromRoot.name ?? cust.name ?? '—',
+    company: dc.company ?? seedC.company ?? cust.company ?? null,
+    address: dc.address ?? seedC.address ?? cust.address ?? null,
+    phones: [
+      ...(Array.isArray(seedC.phones) ? seedC.phones : []),
+      ...(Array.isArray(dc.phones) ? dc.phones : []),
+      cust.phone,
+      cust.mobile,
+      contactFromRoot.phone,
+    ],
+    emails: [
+      ...(Array.isArray(seedC.emails) ? seedC.emails : []),
+      ...(Array.isArray(dc.emails) ? dc.emails : []),
+      cust.email,
+      cust.primaryEmail,
+      contactFromRoot.email,
+    ],
+    tags: [
+      ...(Array.isArray(seedC.tags) ? seedC.tags : []),
+      ...(Array.isArray(dc.tags) ? dc.tags : []),
+    ],
+    custom: { ...(seedC.custom || {}), ...(dc.custom || {}) },
+    pipeline: dc.pipeline ?? seedC.pipeline ?? null,
+  }
+
+  const contact = normalizeContact(merged)
 
   return {
     appointmentId: d.appointmentId || d.id || seed.appointmentId || seed.id || '—',
@@ -76,7 +122,10 @@ function normalizeJob(raw = {}, seed = {}) {
     startTime,
     endTime,
     contact,
-  };
+    // keep common root fields around for fallback rendering if needed
+    email: contactFromRoot.email ?? null,
+    contactEmail: d.contactEmail ?? null,
+  }
 }
 
 function Row({ label, children }) {
@@ -93,35 +142,95 @@ export default function JobDetails({ jobId, seed, onClose }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
 
-  const assignedUserId  = data?.assignedUserId ?? null
-  const assignedRepName = data?.assignedRepName ?? null
-  const assignedLabel   = assignedRepName ?? (assignedUserId ? `#${assignedUserId}` : 'Unassigned')
+  // --- editing + save ---
+  const [saving, setSaving] = useState(false)
+  const [editStart, setEditStart] = useState(null)
+  const [editEnd, setEditEnd] = useState(null)
+  const [editAssignee, setEditAssignee] = useState('')
 
-useEffect(() => {
-  let alive = true;
-  (async () => {
-    try {
-      const r = await fetch(`${API_BASE}/api/job/${encodeURIComponent(jobId)}`);
-      if (!r.ok) throw new Error('no job');
-      const d = await r.json();
-      if (!alive) return;
+  // load the job (or seed fallback)
+  useEffect(() => {
+    let alive = true
 
-      // handle both shapes: {ok:true, items:{...}} or just {...}
-      const payload = d?.items ?? d;
+    ;(async () => {
+      try {
+        setLoading(true)
 
-      setData(normalizeJob(payload, seed));
-    } catch {
-      if (!alive) return;
-      setData(normalizeJob({}, seed));
-    } finally {
-      if (alive) setLoading(false);
+        if (!jobId) {
+          if (alive) setData(normalizeJob({}, seed))
+          return
+        }
+
+        const r = await fetch(`${API_BASE}/api/job/${encodeURIComponent(jobId)}`)
+        if (!r.ok) throw new Error('no job')
+        const d = await r.json()
+        if (!alive) return
+
+        const payload = d?.items ?? d
+        if (alive) setData(normalizeJob(payload, seed))
+      } catch {
+        if (!alive) return
+        setData(normalizeJob({}, seed))
+      } finally {
+        if (alive) setLoading(false)
+      }
+    })()
+
+    return () => {
+      alive = false
     }
-  })();
-  return () => { alive = false };
-}, [jobId, seed]);
+  }, [jobId, seed])
+
+  // seed edit controls once data is available
+  useEffect(() => {
+    if (!data) return
+    if (editStart === null) setEditStart(data.startTime || null)
+    if (editEnd === null) setEditEnd(data.endTime || null)
+    if (editAssignee === '') {
+      setEditAssignee(data.assignedUserId != null ? String(data.assignedUserId) : '')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data])
+
+  async function saveChanges() {
+    const id = jobId || seed?.appointmentId || seed?.id || data?.appointmentId
+    if (!id) return
+
+    const payload = {}
+    if (editStart) payload.startTime = editStart
+    if (editEnd) payload.endTime = editEnd
+    if (editAssignee) payload.assignedUserId = String(editAssignee)
+
+    try {
+      setSaving(true)
+      await fetch(`${API_BASE}/api/jobs/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      setData(prev =>
+        prev
+          ? {
+              ...prev,
+              startTime: payload.startTime ?? prev.startTime,
+              endTime: payload.endTime ?? prev.endTime,
+              assignedUserId: payload.assignedUserId ?? prev.assignedUserId,
+            }
+          : prev
+      )
+      onClose?.()
+    } catch (e) {
+      console.error('Save failed', e)
+    } finally {
+      setSaving(false)
+    }
+  }
 
   if (loading) return <div className="p-4 text-sm text-white/60">Loading…</div>
   if (!data) return <div className="p-4 text-sm text-white/60">Not found.</div>
+
+  const assignedUserId = data?.assignedUserId ?? null
+  const assignedRepName = data?.assignedRepName ?? null
 
   const c = normalizeContact(data?.contact || {})
   const jobAddr = addrToString(data.address)
@@ -132,13 +241,19 @@ useEffect(() => {
   const dStart = data.startTime ? new Date(data.startTime) : new Date()
   const dEnd = data.endTime ? new Date(data.endTime) : new Date(dStart.getTime() + 60 * 60 * 1000)
 
-  const dateStr = dStart.toLocaleDateString(undefined, {
-    weekday: 'short', month: 'short', day: 'numeric', timeZone: tz,
-  })
   const startStr = dStart.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', timeZone: tz })
-  const endStr   = dEnd.toLocaleTimeString(undefined,   { hour: 'numeric', minute: '2-digit', timeZone: tz })
+  const endStr = dEnd.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', timeZone: tz })
 
   const travelMinutes = typeof data.travelMinutesFromPrev === 'number' ? data.travelMinutesFromPrev : null
+
+  // --- Email fallback if array is empty but a single email exists somewhere else
+  const arrayEmails = Array.isArray(c.emails) ? c.emails.filter(Boolean) : []
+  const singleFallbackEmail =
+    data?.contactEmail ||
+    data?.email ||
+    (data?.contact && (data.contact.email || data.contact.primaryEmail || data.contact.contactEmail)) ||
+    null
+  const effectiveEmails = arrayEmails.length ? arrayEmails : (singleFallbackEmail ? [singleFallbackEmail] : [])
 
   return (
     <div className="fixed inset-0 z-[500] flex">
@@ -155,6 +270,13 @@ useEffect(() => {
         <div className="mb-3">
           <div className="text-xs text-white/60">Job</div>
           <div className="text-lg font-semibold">#{data.appointmentId}</div>
+          <Link
+            to={`/calendar?date=${encodeURIComponent(data.startTime)}&assigned=${encodeURIComponent(data.assignedUserId ?? '')}&id=${encodeURIComponent(data.appointmentId)}`}
+            onClick={onClose}
+            className="ml-2 text-xs underline text-blue-400 hover:text-blue-300"
+          >
+            View on Calendar
+          </Link>
         </div>
 
         <div className="grid grid-cols-1 gap-3">
@@ -183,7 +305,9 @@ useEffect(() => {
                     if (!c.id) { e.preventDefault(); return }
                     onClose?.()
                   }}
-                  className={`px-2 py-1 rounded-none glass text-xs ${c.id ? 'hover:bg-panel/70' : 'opacity-50 pointer-events-none'}`}
+                  className={`px-2 py-1 rounded-none glass text-xs ${
+                    c.id ? 'hover:bg-panel/70' : 'opacity-50 pointer-events-none'
+                  }`}
                   title={c.id ? 'Open conversation' : 'No contact ID'}
                 >
                   View Conversation
@@ -209,11 +333,15 @@ useEffect(() => {
 
               <Row label="Email">
                 <div className="flex items-center gap-2 flex-wrap">
-                  {c.emails?.length ? (
-                    c.emails.map((e, i) => (
-                      <a key={i} href={`mailto:${e}`} className="text-white/90 hover:underline flex items-center gap-1">
+                  {effectiveEmails.length ? (
+                    effectiveEmails.map((em, i) => (
+                      <a
+                        key={i}
+                        href={`mailto:${em}`}
+                        className="text-white/90 hover:underline flex items-center gap-1"
+                      >
                         <Mail size={14} />
-                        {e}
+                        {em}
                       </a>
                     ))
                   ) : (
@@ -273,6 +401,7 @@ useEffect(() => {
           {/* Job */}
           <div className="glass rounded-none p-3">
             <div className="text-xs text-white/60">Job</div>
+
             <div className="mt-1 text-sm">
               Type: <span className="text-white/90">{data.jobType}</span>
             </div>
@@ -289,20 +418,77 @@ useEffect(() => {
             <div className="mt-1 text-sm">
               Territory: <span className="text-white/90">{data.territory}</span>
             </div>
-            <div className="mt-1 text-sm">
-              Assigned to: <span className="text-white/90">{assignedLabel}</span>
+
+            {/* Editable fields */}
+            <div className="mt-3 grid sm:grid-cols-2 gap-2">
+              <label className="text-xs text-white/70">
+                Start
+                <input
+                  type="datetime-local"
+                  className="mt-1 w-full bg-black/30 border border-white/10 rounded-none px-2 py-1 text-sm outline-none"
+                  value={editStart ? new Date(editStart).toISOString().slice(0, 16) : ''}
+                  onChange={(e) => {
+                    const iso = new Date(e.target.value).toISOString()
+                    setEditStart(iso)
+                  }}
+                />
+              </label>
+
+              <label className="text-xs text-white/70">
+                End
+                <input
+                  type="datetime-local"
+                  className="mt-1 w-full bg-black/30 border border-white/10 rounded-none px-2 py-1 text-sm outline-none"
+                  value={editEnd ? new Date(editEnd).toISOString().slice(0, 16) : ''}
+                  onChange={(e) => {
+                    const iso = new Date(e.target.value).toISOString()
+                    setEditEnd(iso)
+                  }}
+                />
+              </label>
             </div>
-            <div className="mt-1 text-sm">
-              Window:{' '}
+
+            <label className="mt-2 block text-xs text-white/70">
+              Assigned User ID
+              <input
+                type="text"
+                className="mt-1 w-full bg-black/30 border border-white/10 rounded-none px-2 py-1 text-sm outline-none"
+                placeholder="e.g. 123"
+                value={editAssignee}
+                onChange={(e) => setEditAssignee(e.target.value)}
+              />
+            </label>
+
+            {/* Read-only helpers */}
+            <div className="mt-2 text-sm">
+              Assigned to:{' '}
               <span className="text-white/90">
-                {dateStr}, {startStr} – {endStr}
+                {data.assignedRepName ?? (data.assignedUserId ? `#${data.assignedUserId}` : 'Unassigned')}
               </span>
             </div>
+
             {travelMinutes != null && (
               <div className="mt-1 text-sm">
                 Travel from previous: <span className="text-white/90">{travelMinutes} min</span>
               </div>
             )}
+
+            {/* Actions */}
+            <div className="mt-3 flex gap-2">
+              <button
+                onClick={saveChanges}
+                disabled={saving}
+                className="px-3 py-2 rounded-none glass hover:bg-panel/70 text-sm"
+              >
+                {saving ? 'Saving…' : 'Save'}
+              </button>
+              <button
+                onClick={onClose}
+                className="px-3 py-2 rounded-none glass hover:bg-panel/70 text-sm"
+              >
+                Close
+              </button>
+            </div>
           </div>
         </div>
       </aside>

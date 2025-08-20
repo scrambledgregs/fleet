@@ -84,6 +84,10 @@ async function getDriveMinutes(from, to) {
 // In-memory store per client
 const techsByClient = new Map(); // clientId -> tech array
 const jobsByClient  = new Map(); // clientId -> Map(appointmentId -> job)
+const vehiclesByClient = new Map(); // clientId -> [{id,name,plate,capacity}]
+const newId = (p='id_') => p + Math.random().toString(36).slice(2);
+
+
 
 // --- Per-contact Chat AI state (autopilot) ---
 const autopilotPref = new Map(); // key = id or phone (E.164), value = boolean
@@ -133,6 +137,79 @@ app.use((req, _res, next) => {
 })
 
 app.use(createChatterRouter(io));
+
+// ---- VEHICLES CRUD ----
+app.get('/api/vehicles', (req, res) => {
+  const clientId = (req.query.clientId || 'default').trim();
+  const list = vehiclesByClient.get(clientId) || [];
+  res.json({ ok:true, clientId, vehicles: list });
+});
+
+// --- Industry Packs: install ---
+app.post('/api/packs/install', (req, res) => {
+  try {
+    const pack = req.body || {};
+    if (!pack || typeof pack !== 'object') {
+      return res.status(400).json({ ok: false, error: 'Invalid pack payload' });
+    }
+
+    // quick shape checks
+    const missing = [];
+    if (!pack.id) missing.push('id');
+    if (!pack.name) missing.push('name');
+    if (typeof pack.version !== 'number') missing.push('version');
+    if (!pack.trade) missing.push('trade');
+    if (missing.length) {
+      return res.status(400).json({ ok: false, error: `Missing: ${missing.join(', ')}` });
+    }
+
+    // TODO: persist pack settings, seed pipelines/pricebook/etc.
+    return res.json({
+      ok: true,
+      installed: { id: pack.id, name: pack.name, version: pack.version, trade: pack.trade },
+      message: 'Pack received and queued for install',
+    });
+  } catch (e) {
+    console.error('[packs/install]', e);
+    res.status(500).json({ ok: false, error: 'Install failed' });
+  }
+});
+
+app.post('/api/vehicles', (req, res) => {
+  const clientId = (req.body.clientId || 'default').trim();
+  const v = req.body || {};
+  const list = vehiclesByClient.get(clientId) || [];
+  const item = {
+    id: newId('veh_'),
+    name: (v.name || 'Van').trim(),
+    plate: (v.plate || '').trim(),
+    capacity: Number(v.capacity) || 0,
+    notes: (v.notes || '').trim(),
+  };
+  list.push(item);
+  vehiclesByClient.set(clientId, list);
+  res.json({ ok:true, vehicle: item });
+});
+
+app.put('/api/vehicles/:id', (req, res) => {
+  const clientId = (req.body.clientId || 'default').trim();
+  const id = req.params.id;
+  const list = vehiclesByClient.get(clientId) || [];
+  const idx = list.findIndex(x => x.id === id);
+  if (idx === -1) return res.status(404).json({ ok:false, error:'not found' });
+  list[idx] = { ...list[idx], ...req.body, id };
+  vehiclesByClient.set(clientId, list);
+  res.json({ ok:true, vehicle: list[idx] });
+});
+
+app.delete('/api/vehicles/:id', (req, res) => {
+  const clientId = (req.query.clientId || 'default').trim();
+  const id = req.params.id;
+  const list = vehiclesByClient.get(clientId) || [];
+  const next = list.filter(x => x.id !== id);
+  vehiclesByClient.set(clientId, next);
+  res.json({ ok:true, removed:id });
+});
 
 // put near the top of server.js
 function normalizeContact(raw = {}) {
@@ -263,6 +340,73 @@ function ensureMockConversationForContact(contactId) {
   return convoId;
 }
 
+// --- Jobs: create/upsert ---
+app.post('/api/jobs', async (req, res) => {
+  try {
+    const b = req.body || {};
+    const clientId = (b.clientId || 'default').trim();
+
+    // ensure client map exists
+    if (!jobsByClient.has(clientId)) jobsByClient.set(clientId, new Map());
+    const jobs = jobsByClient.get(clientId);
+
+    // id / times
+    const id = b.appointmentId || b.id || newId('job_');
+    const startISO = ensureOffsetISO(b.startTime) || new Date().toISOString();
+    const endISO   = ensureOffsetISO(b.endTime)   ||
+      new Date(new Date(startISO).getTime() + 60 * 60 * 1000).toISOString();
+
+    // address + lat/lng
+    const address = toAddressString(b.address);
+    let lat = Number(b.lat), lng = Number(b.lng);
+    const missingOrZero =
+      !Number.isFinite(lat) || !Number.isFinite(lng) || (lat === 0 && lng === 0);
+
+    if (missingOrZero && address) {
+      try {
+        const geo = await geocodeAddress(address);
+        if (geo) { lat = geo.lat; lng = geo.lng; }
+      } catch {}
+    }
+
+    // contact
+    const contact = normalizeContact(b.contact || {});
+
+    // store
+    const job = {
+      appointmentId: id,
+      startTime: startISO,
+      endTime: endISO,
+      jobType: b.jobType || 'Job',
+      estValue: Number(b.estValue) || 0,
+      territory: b.territory || null,
+      assignedUserId: b.assignedUserId || null,
+      assignedRepName: b.assignedRepName || null,
+      address,
+      lat: Number.isFinite(lat) ? lat : null,
+      lng: Number.isFinite(lng) ? lng : null,
+      contact,
+    };
+
+    jobs.set(job.appointmentId, job);
+
+    // live-refresh UIs
+    io.emit('job:created', { clientId, job });
+
+    res.json({ ok: true, job });
+  } catch (e) {
+    console.error('[POST /api/jobs]', e);
+    res.status(500).json({ ok:false, error: 'failed to create job' });
+  }
+});
+
+// --- Jobs: list (debug/convenience) ---
+app.get('/api/jobs', (req, res) => {
+  const clientId = (req.query.clientId || 'default').trim();
+  const jobsMap = jobsByClient.get(clientId) || new Map();
+  res.json({ ok: true, items: Array.from(jobsMap.values()) });
+});
+
 /**
  * POST /api/job/:id/ensure-thread
  * Body: { clientId?: string }
@@ -311,6 +455,48 @@ app.post('/api/clear-jobs', (req, res) => {
   jobsByClient.set(clientId, new Map());
   res.json({ ok: true, message: `Jobs cleared for ${clientId}` })
 })
+
+// PATCH /api/jobs/:id  → { startTime?, endTime?, assignedUserId? , clientId? }
+app.patch('/api/jobs/:id', async (req, res) => {
+  try {
+    const clientId = (req.body.clientId || 'default').trim();
+    const jobs = jobsByClient.get(clientId) || new Map();
+    const job = jobs.get(req.params.id);
+    if (!job) return res.status(404).json({ ok:false, error:'job not found' });
+
+    const { startTime, endTime, assignedUserId } = req.body || {};
+
+    // 1) Apply local changes
+    if (startTime) job.startTime = ensureOffsetISO(startTime);
+    if (endTime)   job.endTime   = ensureOffsetISO(endTime);
+    if (assignedUserId) job.assignedUserId = String(assignedUserId);
+
+    jobs.set(job.appointmentId, job);
+
+    // 2) Reflect in GHL (best-effort)
+    try {
+      if (assignedUserId) {
+        await updateAppointmentOwner(job.appointmentId, assignedUserId);
+        await appendAppointmentNotes(job.appointmentId, `Reassigned to ${assignedUserId} via Calendar/Board`);
+      }
+      if (startTime || endTime) {
+        await rescheduleAppointment(job.appointmentId, job.startTime, job.endTime);
+        await appendAppointmentNotes(job.appointmentId, `Rescheduled to ${job.startTime} – ${job.endTime}`);
+      }
+    } catch (e) {
+      console.warn('[PATCH /api/jobs/:id] GHL sync warning:', e?.response?.data || e.message);
+    }
+
+    // 3) Notify all UIs
+    io.emit('job:updated', { clientId, job });
+
+    res.json({ ok:true, job });
+  } catch (e) {
+    console.error('[PATCH /api/jobs/:id]', e);
+    res.status(500).json({ ok:false, error:'update failed' });
+  }
+});
+
 
 // --- Chat AI per-contact state (used by Chatter.jsx) ---
 // GET /api/agent/state?phone=+1555...&id=contact_123
@@ -1170,6 +1356,7 @@ app.post('/api/techs', (req, res) => {
   }
 });
 
+
 // Approve & assign a candidate to an appointment
 app.post('/api/approve-assignment', async (req, res) => {
   try {
@@ -1234,7 +1421,7 @@ console.log("[DEBUG GHL incoming appt]", JSON.stringify(appt, null, 2));
       } catch {}
     }
 
-    try {
+      try {
       const contactId = appt.contactId || body.contactId;
       const contactFirst = appt.contactFirstName || body.contactFirstName;
       const contactLast = appt.contactLastName || body.contactLastName;

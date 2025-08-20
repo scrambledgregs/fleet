@@ -1,6 +1,5 @@
-// App.jsx
-import { useState } from 'react'
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
+import { useState, useEffect } from 'react'
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom'
 
 import TopBar from './components/TopBar.jsx'
 import StatBar from './components/StatBar.jsx'
@@ -10,12 +9,58 @@ import MapPanel from './components/MapPanel.jsx'
 import RequestAppointment from './pages/RequestAppointment.jsx'
 import JobDetails from './components/JobDetails.jsx'
 import Chatter from './pages/Chatter'
+import Onboarding from './pages/Onboarding.jsx'
+import Signup from './pages/Signup.jsx'
+import Settings from './pages/Settings.jsx'
+import ContactsPage from './pages/Contacts.jsx'
+import VehiclesPage from './pages/Vehicles.jsx'
+import Calendar from './pages/Calendar.jsx'
+import Affiliate from './pages/Affiliate.jsx'
+import IndustryPacks from './pages/IndustryPacks.jsx'
+import FloatingCTA from './components/FloatingCTA.jsx'
+import { API_BASE } from './config'
+
+// --- Small inline guard: if no techs yet, send to /onboarding ---
+function RequireSetup({ children }) {
+  const [loading, setLoading] = useState(true)
+  const [ok, setOk] = useState(false)
+
+  useEffect(() => {
+    let alive = true
+    ;(async () => {
+      try {
+        const r = await fetch(`${API_BASE}/api/techs?clientId=default`)
+        const j = await r.json().catch(() => ({}))
+        if (!alive) return
+        const count = Number(j?.count || 0)
+        setOk(count > 0)
+      } catch {
+        if (!alive) return
+        setOk(false)
+      } finally {
+        if (alive) setLoading(false)
+      }
+    })()
+    return () => { alive = false }
+  }, [])
+
+  if (loading) return null
+  if (!ok) return <Navigate to="/onboarding" replace />
+  return children
+}
 
 function Dashboard({ mode, setMode, compact, setCompact }) {
-  // selection for details drawer
   const [selectedJob, setSelectedJob] = useState(null)
-  // NEW: active tab for the left rail
-  const [tab, setTab] = useState('planner') // 'planner' | 'contacts' | 'alerts' | 'chatter' | 'vehicles'
+  const [tab, setTab] = useState('planner') // 'planner' | 'contacts' | 'chatter' | 'vehicles'
+  const location = useLocation()
+
+  useEffect(() => {
+    const q = new URLSearchParams(location.search)
+    const t = q.get('tab')
+    if (t && ['planner','contacts','chatter','vehicles'].includes(t)) {
+      setTab(t)
+    }
+  }, [location.search])
 
   return (
     <div className={'min-h-screen text-white ' + (compact ? 'compact-root' : '')}>
@@ -24,34 +69,29 @@ function Dashboard({ mode, setMode, compact, setCompact }) {
         <StatBar />
       </div>
 
-      {/* Three-column layout: left rail, content column, map column */}
       <main className={'grid grid-cols-12 ' + (compact ? 'gap-4 p-4' : 'gap-6 p-6')}>
-        {/* Left rail */}
         <aside className="col-span-12 lg:col-span-2">
           <SideNav tab={tab} onChange={setTab} />
         </aside>
 
-        {/* Middle content column (jobs/contacts/alerts/chatter/vehicles lists) */}
         <section className="col-span-12 lg:col-span-4 xl:col-span-5 glass rounded-none p-3">
           <LeftPanel
-            tab={tab}                               // <-- wire nav into LeftPanel
+            tab={tab}
             mode={mode}
             selectedJobId={selectedJob?.id || selectedJob?.appointmentId}
             onSelectJob={(job) => setSelectedJob(job)}
           />
         </section>
 
-        {/* Map column */}
         <section className="col-span-12 lg:col-span-6 xl:col-span-5 glass rounded-none overflow-hidden">
           <MapPanel
             compact={compact}
-            highlightedJobId={selectedJob?.id || selectedJob?.appointmentId} // keep as-is to avoid functional changes
+            highlightedJobId={selectedJob?.id || selectedJob?.appointmentId}
             onPinClick={(job) => setSelectedJob(job)}
           />
         </section>
       </main>
 
-      {/* One place to show details, regardless of view */}
       {selectedJob && (
         <JobDetails
           jobId={selectedJob.appointmentId || selectedJob.id}
@@ -72,12 +112,27 @@ export default function App() {
       <Routes>
         <Route
           path="/"
-          element={<Dashboard mode={mode} setMode={setMode} compact={compact} setCompact={setCompact} />}
+          element={
+            <RequireSetup>
+              <Dashboard mode={mode} setMode={setMode} compact={compact} setCompact={setCompact} />
+            </RequireSetup>
+          }
         />
+        <Route path="/calendar" element={<Calendar />} />
+        <Route path="/contacts" element={<ContactsPage />} />
+        <Route path="/vehicles" element={<VehiclesPage />} />
+        <Route path="/packs" element={<IndustryPacks />} />
+        <Route path="/affiliate" element={<Affiliate />} />
+        <Route path="/signup" element={<Signup />} />
+        <Route path="/onboarding" element={<Onboarding />} />
         <Route path="/requestappointment" element={<RequestAppointment />} />
         <Route path="/chatter" element={<Chatter />} />
         <Route path="/chatter/:contactId" element={<Chatter />} />
+        <Route path="/settings" element={<Settings />} />
       </Routes>
+
+      {/* Global CTA visible on most pages */}
+      <FloatingCTA />
     </Router>
   )
 }
