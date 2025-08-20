@@ -1,11 +1,42 @@
 // components/TopBar.jsx
 import { Bolt, ToggleLeft, ToggleRight } from 'lucide-react'
 import { Link, useLocation } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { API_BASE } from '../config'
 
 export default function TopBar({ mode, setMode, compact, setCompact }) {
   const isAuto = mode === 'Auto'
   const { pathname } = useLocation()
   const onRequestPage = pathname === '/requestappointment'
+
+  // Voice AI global toggle state
+  const [voiceOn, setVoiceOn] = useState(false)
+
+  useEffect(() => {
+    let alive = true
+    ;(async () => {
+      try {
+        const r = await fetch(`${API_BASE}/api/voice/state`)
+        const j = await r.json()
+        if (alive && j?.ok) setVoiceOn(!!j.enabled)
+      } catch {}
+    })()
+    return () => { alive = false }
+  }, [])
+
+  async function toggleVoice(next) {
+    setVoiceOn(next) // optimistic
+    try {
+      await fetch(`${API_BASE}/api/voice/state`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: next }),
+      })
+    } catch {
+      // optional: revert on error
+      // setVoiceOn(v => !v)
+    }
+  }
 
   return (
     <header className="sticky top-0 z-40 bg-background/80 backdrop-blur border-b border-white/5">
@@ -33,6 +64,20 @@ export default function TopBar({ mode, setMode, compact, setCompact }) {
           >
             Request Appointment
           </Link>
+
+         {/* Voice AI toggle */}
+<button
+  onClick={() => toggleVoice(!voiceOn)}
+  className={
+    "flex items-center gap-2 px-2 py-1 rounded-md text-sm font-medium transition " +
+    (voiceOn
+      ? "bg-emerald-600 text-white hover:bg-emerald-500 shadow"
+      : "bg-zinc-700 text-zinc-200 hover:bg-zinc-600")
+  }
+>
+  <span className="w-2 h-2 rounded-full bg-current"></span>
+  {voiceOn ? "Voice AI: ON" : "Voice AI: OFF"}
+</button>
 
           {/* Mode toggle */}
           <div className="text-sm text-white/60 hidden sm:block">Dispatch Mode</div>

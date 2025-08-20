@@ -5,6 +5,7 @@ import { io } from 'socket.io-client'
 import TopBar from '../components/TopBar.jsx'
 import SideNav from '../components/SideNav.jsx'
 import { API_BASE } from '../config'
+import StatBar from '../components/StatBar.jsx'
 
 export default function Chatter() {
   const { contactId } = useParams()
@@ -33,6 +34,20 @@ export default function Chatter() {
   // active conversation id: URL contact or committed manual id
   const effectiveId = contactId || manualId
   const contactLabel = contactId || manualId || (to ? `manual:${to}` : '—')
+
+  // helpers (top of file)
+const normalizePhone = (p) => {
+  if (!p) return '';
+  let s = String(p).replace(/[^\d]/g, '');
+  if (s.length === 10) s = '1' + s;
+  if (!s.startsWith('+')) s = '+' + s;
+  return s;
+};
+const idToPhone = (effectiveId, toField) => {
+  // use manual:+... if present, else try the "To" field
+  if (effectiveId?.startsWith('manual:')) return normalizePhone(effectiveId.slice(7));
+  return normalizePhone(toField);
+};
 
   // helper to append but avoid dupes
   const pushUnique = (incoming) => {
@@ -122,6 +137,34 @@ export default function Chatter() {
     if (effectiveId) inputRef.current?.focus()
   }, [effectiveId])
 
+    // load per-contact Chat AI setting whenever target phone changes
+    useEffect(() => {
+  const phone = idToPhone(effectiveId, to);
+  if (!phone) return;
+  let on = true;
+  (async () => {
+    try {
+      const r = await fetch(`${API_BASE}/api/agent/state?phone=${encodeURIComponent(phone)}`);
+      const j = await r.json();
+      if (j?.ok) setAutopilot(!!j.state?.autopilot);
+    } catch {}
+  })();
+  return () => { on = false; };
+}, [effectiveId, to]);
+
+async function handleToggleAutopilot(next) {
+  setAutopilot(next);
+  const phone = idToPhone(effectiveId, to);
+  if (!phone) return; // no phone yet, just update local UI
+  try {
+    await fetch(`${API_BASE}/api/agent/autopilot`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phone, enabled: next }),
+    });
+  } catch {}
+}
+
   async function handleSend(e) {
     e.preventDefault()
     if (!text.trim()) return
@@ -177,6 +220,10 @@ export default function Chatter() {
   return (
     <div className={'min-h-screen text-white ' + (compact ? 'compact-root' : '')}>
       <TopBar mode={mode} setMode={setMode} compact={compact} setCompact={setCompact} />
+      {/* 👇 Add this wrapper so it matches the rest of the app spacing */}
+    <div className={'px-6 ' + (compact ? 'pt-2' : 'pt-4')}>
+      <StatBar />
+    </div>
 
       <main className={'grid grid-cols-12 ' + (compact ? 'gap-4 p-4' : 'gap-6 p-6')}>
         <aside className="col-span-12 lg:col-span-2">
@@ -184,44 +231,67 @@ export default function Chatter() {
         </aside>
 
         <section className="col-span-12 lg:col-span-10 glass rounded-none p-4">
-          <div className="flex items-center justify-between mb-3">
-            <div>
-              <div className="text-xs text-white/60">Chatter</div>
-              <div className="text-lg font-semibold">Contact #{contactLabel}</div>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                className="px-2 py-1 rounded-none glass text-xs"
-                onClick={() => { setManualId(null); setTo(''); setMessages([]); setError(null); }}
-              >
-                New thread
-              </button>
-              <Link to="/" className="px-2 py-1 rounded-none glass text-xs hover:bg-panel/70">
-                ← Back to Dispatch
-              </Link>
-            </div>
-          </div>
+       <div className="flex items-center justify-between mb-3">
+  <div className="flex items-center gap-2">
+    <div className="text-xs text-white/60">Thread</div>
+    <div className="font-mono text-sm">{contactLabel}</div>
+    <span
+      className={
+        "text-[10px] px-1.5 py-0.5 rounded " +
+        (autopilot ? "bg-emerald-600/30 text-emerald-200" : "bg-zinc-600/30 text-zinc-200")
+      }
+    >
+      {autopilot ? "Autopilot ON" : "Autopilot OFF"}
+    </span>
+  </div>
+
+  <div className="flex items-center gap-3">
+    <label className="flex items-center gap-2 text-xs text-white/80">
+      <input
+        type="checkbox"
+        checked={autopilot}
+        onChange={(e) => handleToggleAutopilot(e.target.checked)}
+        disabled={!idToPhone(effectiveId, to)} // disable if we don't know the phone yet
+      />
+      Chat AI (per contact)
+    </label>
+
+    <button
+      className="px-2 py-1 rounded-none glass text-xs"
+      onClick={() => { setManualId(null); setTo(''); setMessages([]); setError(null); }}
+    >
+      New thread
+    </button>
+  </div>
+</div>
 
           {loading && <div className="text-sm text-white/60">Loading…</div>}
           {error && <div className="text-sm text-red-400">{error}</div>}
 
           {!loading && !error && (
             <>
-              <div className="h-[50vh] min-h-[320px] overflow-auto space-y-2 pr-1 border border-white/10 rounded-none p-3 bg-white/5">
-                {messages.length === 0 && <div className="text-sm text-white/60">No messages yet.</div>}
-                {messages.map((m) => (
-                  <div key={m.id} className="text-xs">
-                    <div className="text-white/50 mb-0.5">
-                      {new Date(m.createdAt).toLocaleString()} • {m.direction}
-                    </div>
-                    <div className="text-white/90">
-                      {m.text || <span className="text-white/50">(no text)</span>}
-                    </div>
-                  </div>
-                ))}
-                <div ref={bottomRef} />
-              </div>
-
+            <div className="h-[50vh] min-h-[320px] overflow-auto space-y-2 pr-1 border border-white/10 rounded-none p-3 bg-white/5">
+  {messages.length === 0 && <div className="text-sm text-white/60">No messages yet.</div>}
+  {messages.map((m) => (
+    <div
+      key={m.id}
+      className={
+        m.direction === 'outbound'
+          ? "ml-auto max-w-[75%] rounded-2xl px-3 py-2 shadow-sm bg-gray-900 text-white"
+          : "mr-auto max-w-[75%] rounded-2xl px-3 py-2 shadow-sm bg-white/10 border border-white/10"
+      }
+    >
+      <div className="text-sm whitespace-pre-wrap">
+        {m.text || <span className="text-white/50">(no text)</span>}
+      </div>
+      <div className="mt-1 text-[11px] opacity-60">
+        {new Date(m.createdAt).toLocaleString()}
+      </div>
+    </div>
+  ))}
+  <div ref={bottomRef} />
+</div>
+             
               {/* composer controls */}
               <div className="mt-3 flex items-center gap-3">
                 <label className="text-xs text-white/70">To</label>

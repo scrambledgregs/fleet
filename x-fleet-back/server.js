@@ -34,6 +34,7 @@ async function geocodeAddress(address) {
   const hit = geocodeCache.get(address);
   if (hit) return hit;
   const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+  if (!apiKey) return null;
   const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${apiKey}`;
   const resp = await fetch(url);
   const data = await resp.json();
@@ -61,6 +62,7 @@ async function getDriveMinutes(from, to) {
   if (hit) return hit;
 
   const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+  if (!apiKey) return null;
   const url = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${encodeURIComponent(f)}&destinations=${encodeURIComponent(t)}&mode=driving&departure_time=now&key=${apiKey}`;
 
   try {
@@ -83,6 +85,22 @@ async function getDriveMinutes(from, to) {
 const techsByClient = new Map(); // clientId -> tech array
 const jobsByClient  = new Map(); // clientId -> Map(appointmentId -> job)
 
+// --- Per-contact Chat AI state (autopilot) ---
+const autopilotPref = new Map(); // key = id or phone (E.164), value = boolean
+
+function setAutoPref({ id, phone, enabled }) {
+  if (typeof enabled !== 'boolean') return;
+  if (id) autopilotPref.set(String(id), enabled);
+  if (phone) autopilotPref.set(String(phone), enabled);
+}
+
+function getAutoPref({ id, phone }) {
+  // precedence: explicit id, then phone
+  if (id != null && autopilotPref.has(String(id))) return autopilotPref.get(String(id));
+  if (phone != null && autopilotPref.has(String(phone))) return autopilotPref.get(String(phone));
+  return null; // means "no override"
+}
+
 // Demo tech seeding
 const SHOULD_SEED_DEMO = process.env.SEED_DEMO_TECHS === 'true';
 function ensureDemoTechs(clientId = 'default') {
@@ -98,6 +116,9 @@ function ensureDemoTechs(clientId = 'default') {
 const mockConvos = new Map();      // conversationId -> { id, contactId, messages: [...] }
 const mockByContact = new Map();   // contactId -> conversationId
 const uuid = () => 'c_' + Math.random().toString(36).slice(2);
+
+// --- Voice AI global toggle (additive) ---
+let VOICE_AI_ENABLED = false;
 
 app.use(cors({ origin: process.env.ALLOW_ORIGIN || '*' }))
 app.use(express.json({ limit: '10mb' }))
@@ -225,37 +246,134 @@ app.get('/api/test-geocode', async (req, res) => {
 
 app.get('/health', (req,res)=> res.json({ ok:true }))
 
+// --- helper to pick a primary phone from a contact
+function pickPrimaryPhone(c = {}) {
+  const arr = Array.isArray(c.phones) ? c.phones.filter(Boolean) : [];
+  return arr[0] || c.phone || c.mobile || c.primaryPhone || null;
+}
+
+// Create or fetch a mock conversation for a contact (reuses your mockConvos store)
+function ensureMockConversationForContact(contactId) {
+  let convoId = mockByContact.get(contactId);
+  if (!convoId) {
+    convoId = uuid();
+    mockByContact.set(contactId, convoId);
+    mockConvos.set(convoId, { id: convoId, contactId, messages: [] });
+  }
+  return convoId;
+}
+
+/**
+ * POST /api/job/:id/ensure-thread
+ * Body: { clientId?: string }
+ * Returns: { ok, conversationId, contact, phone, autopilot }
+ */
+app.post('/api/job/:id/ensure-thread', async (req, res) => {
+  try {
+    const clientId = (req.body.clientId || 'default').trim();
+    const jobs = jobsByClient.get(clientId) || new Map();
+    const job = jobs.get(req.params.id);
+
+    if (!job) return res.status(404).json({ ok:false, error:'Job not found' });
+
+    // Normalize contact & enrich if needed
+    let contact = normalizeContact(job.contact || {});
+    if ((!contact.phones?.length || !contact.name) && (contact.id || contact.emails?.[0])) {
+      try {
+        const enriched = await getContact(contact.id, { email: contact.emails?.[0] });
+        contact = normalizeContact({ ...contact, ...enriched });
+      } catch {}
+    }
+
+    if (!contact.id) {
+      return res.status(400).json({ ok:false, error:'Job has no contact id' });
+    }
+
+    // Make sure we have a usable phone for SMS UI
+    const phone = pickPrimaryPhone(contact);
+
+    // Ensure a conversation exists (mock layer for now)
+    const conversationId = ensureMockConversationForContact(contact.id);
+
+    // Read autopilot state for this contact (your per-contact override)
+    const pref = getAutoPref({ id: contact.id, phone: phoneE164(phone) });
+    const autopilot = (pref == null) ? (CHATTER_AI === true) : !!pref;
+
+    return res.json({ ok:true, conversationId, contact, phone, autopilot });
+  } catch (e) {
+    console.error('[ensure-thread]', e);
+    res.status(500).json({ ok:false, error:'failed to ensure thread' });
+  }
+});
+
 app.post('/api/clear-jobs', (req, res) => {
   const clientId = req.body.clientId || 'default';
   jobsByClient.set(clientId, new Map());
   res.json({ ok: true, message: `Jobs cleared for ${clientId}` })
 })
 
+// --- Chat AI per-contact state (used by Chatter.jsx) ---
+// GET /api/agent/state?phone=+1555...&id=contact_123
+app.get('/api/agent/state', (req, res) => {
+  const id = req.query.id?.trim();
+  const phone = phoneE164(req.query.phone?.trim());
+  const pref = getAutoPref({ id, phone });
+  const effective = (pref == null) ? (CHATTER_AI === true) : !!pref;
+  const source = (pref == null) ? 'global_default' : 'per_contact';
+  res.json({ ok: true, state: { autopilot: effective }, source });
+});
+
+// POST /api/agent/autopilot { id?, phone?, enabled: boolean }
+app.post('/api/agent/autopilot', (req, res) => {
+  try {
+    const { id, phone, enabled } = req.body || {};
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({ ok: false, error: 'enabled must be boolean' });
+    }
+    setAutoPref({ id, phone: phoneE164(phone), enabled });
+    res.json({ ok: true, saved: { id: id || null, phone: phoneE164(phone) || null, enabled } });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message || 'failed to save' });
+  }
+});
+
+// --- Voice AI (incoming calls) global state ---
+app.get('/api/voice/state', (_req, res) => {
+  res.json({ ok: true, enabled: !!VOICE_AI_ENABLED });
+});
+
+app.post('/api/voice/state', (req, res) => {
+  VOICE_AI_ENABLED = !!req.body?.enabled;
+  res.json({ ok: true, enabled: VOICE_AI_ENABLED });
+});
+
 // Twilio inbound SMS webhook
 app.post('/twilio/sms', express.urlencoded({ extended: false }), async (req, res) => {
   const { From, Body, To } = req.body || {};
 
-  // Log inbound into the in-memory thread
   recordSms({ to: To, from: From, direction: 'inbound', text: Body });
-
-  // Push to UI
   io.emit('sms:inbound', { from: From, to: To, text: Body, at: new Date().toISOString() });
 
   try {
-    // Hand off to the agent. It will call `send()` to reply if autopilot is ON.
-    await agentHandle({
-      from: From,
-      to: To,
-      text: Body,
-      send: async (toPhone, replyText) => {
-        const resp = await sendSMS(toPhone, replyText);
-        recordSms({ to: toPhone, from: To, direction: 'outbound', text: replyText });
-        io.emit('sms:outbound', { sid: resp.sid, to: toPhone, text: replyText, at: new Date().toISOString() });
-        return resp;
-      },
-    });
+    // decide if Chat AI should reply for this sender
+    const phoneNorm = phoneE164(From);
+    const pref = getAutoPref({ phone: phoneNorm });
+    const useAI = (pref == null) ? (CHATTER_AI === true) : !!pref;
 
-    // Tell Twilio the webhook was handled
+    if (useAI) {
+      await agentHandle({
+        from: From,
+        to: To,
+        text: Body,
+        send: async (toPhone, replyText) => {
+          const resp = await sendSMS(toPhone, replyText);
+          recordSms({ to: toPhone, from: To, direction: 'outbound', text: replyText });
+          io.emit('sms:outbound', { sid: resp.sid, to: toPhone, text: replyText, at: new Date().toISOString() });
+          return resp;
+        },
+      });
+    }
+
     res.type('text/xml').send('<Response/>');
   } catch (err) {
     console.error('[twilio/sms agent error]', err?.message || err);
@@ -402,23 +520,27 @@ app.get('/api/week-appointments', async (req, res) => {
       }
     }
 
-    const out = items.map(it => ({
-      id: it.id,
-      startTime: it.startTimeISO,
-      day: it.day,
-      time: it.time,
-      dateText: it.dateText,
-      address: it.address,
-      lat: it.lat, lng: it.lng,
-      jobType: it.jobType,
-      estValue: Number(it.estValue) || 0, 
-      territory: it.territory,
-      contact: it.contact,
-      travelMinutesFromPrev: it.travelMinutesFromPrev,
-      assignedUserId: it.assignedUserId || null,
-      assignedRepName: nameById.get(it.assignedUserId) || null,    }));
+     const out = items.map(it => ({
+    id: it.id,
+    // keep both field names so UI components don’t break
+    startTime: it.startTimeISO,
+    startTimeISO: it.startTimeISO,
+    day: it.day,
+    time: it.time,
+    dateText: it.dateText,
+    address: it.address,
+    lat: it.lat,
+    lng: it.lng,
+    jobType: it.jobType,
+    estValue: Number(it.estValue) || 0,
+    territory: it.territory,
+    contact: it.contact,
+    travelMinutesFromPrev: it.travelMinutesFromPrev,
+    assignedUserId: it.assignedUserId || null,
+    assignedRepName: nameById.get(it.assignedUserId) || null,
+  }));
 
-    res.json(out);
+  res.json(out);
   } catch (e) {
     console.error('[week-appointments]', e);
     res.status(500).json({ ok: false, error: 'failed to build week' });
@@ -523,7 +645,7 @@ app.get('/api/job/:id', (req, res) => {
     contact: normalizeContact(job.contact || {}),
   };
 
-  res.json(out);
+  res.json({ ok: true, items: out });
 });
 
 // add in server.js
@@ -699,7 +821,6 @@ if (SUGGEST_SLOTS_SOURCE === 'local') {
     return res.status(500).json({ ok:false, error: msg });
   }
 });
- // server.js — replace your /api/mock/ghl/send-message route with this
 
 app.post('/api/mock/ghl/send-message', async (req, res) => {
   const {
@@ -707,11 +828,19 @@ app.post('/api/mock/ghl/send-message', async (req, res) => {
     text = '',
     direction = 'outbound',
     channel = 'sms',
-    autopilot
+    autopilot,
+    to, // optional phone number for manual threads
   } = req.body || {};
   if (!contactId) return res.status(400).json({ ok:false, error:'contactId required' });
 
-  let convoId = mockByContact.get(contactId);
+  // when persisting an explicit flag
+if (typeof autopilot === 'boolean') {
+  setAutoPref({ id: contactId, phone: phoneE164(to), enabled: autopilot });
+}
+
+// (we’ll read the preference inside the IIFE right before deciding)
+  
+let convoId = mockByContact.get(contactId);
   if (!convoId) {
     convoId = uuid();
     mockByContact.set(contactId, convoId);
@@ -730,63 +859,62 @@ app.post('/api/mock/ghl/send-message', async (req, res) => {
 
   io.emit('sms:outbound', { sid: msg.id, contactId, text: msg.text, at: msg.createdAt });
 
+ // --- decide if AI should reply, and (optionally) pass job context ---
   (async () => {
     if (direction !== 'outbound') return;
 
-    const useAI = typeof autopilot === 'boolean' ? autopilot : CHATTER_AI;
+    const clientIdForJob = (req.body.clientId || 'default').trim();
+    const appointmentId  = req.body.appointmentId || null;
 
-    if (useAI) {
-      try {
-        await agentHandle({
-          from: `contact:${contactId}`,
-          to: 'chatter',
-          text,
-          send: async (_to, replyText) => {
-            const reply = {
-              id: uuid(),
-              direction: 'inbound',
-              channel,
-              text: replyText,
-              createdAt: new Date().toISOString(),
-            };
-            const c = mockConvos.get(convoId);
-            if (c) c.messages.push(reply);
-            io.emit('sms:inbound', {
-              sid: reply.id,
-              contactId,
-              text: reply.text,
-              at: reply.createdAt,
-            });
-            return { sid: reply.id };
-          },
-        });
-      } catch (e) {
-        console.warn('[agentHandle mock]', e?.message || e);
-      }
-    } else {
-      setTimeout(() => {
-        const replyText = `Auto-bot: thanks for your message — "${text}". How can I help further?`;
-        const reply = {
-          id: uuid(),
-          direction: 'inbound',
-          channel,
-          text: replyText,
-          createdAt: new Date().toISOString(),
-        };
-        const c = mockConvos.get(convoId);
-        if (c) c.messages.push(reply);
-        io.emit('sms:inbound', {
-          sid: reply.id,
-          contactId,
-          text: reply.text,
-          at: reply.createdAt,
-        });
-      }, 900);
+    // Read per-contact pref (or global). If this message is from a Job drawer,
+    // force AI OFF so it never tries to (re)book inside the job thread.
+    const pref      = getAutoPref({ id: contactId, phone: phoneE164(to) });
+    const aiDefault = (typeof autopilot === 'boolean') ? autopilot : (pref == null ? CHATTER_AI : pref);
+    const useAI     = appointmentId ? false : aiDefault;
+
+    // Optional job context (minimal)
+    let jobContext = null;
+    if (appointmentId) {
+      const jobs = jobsByClient.get(clientIdForJob) || new Map();
+      const j = jobs.get(appointmentId);
+      if (j) jobContext = { appointmentId: j.appointmentId };
+    }
+
+    if (!useAI) return;
+
+    try {
+      await agentHandle({
+        from: `contact:${contactId}`,
+        to: 'chatter',
+        text,
+        context: jobContext ? { job: jobContext, contactId } : { contactId },
+        send: async (_to, replyText) => {
+          const reply = {
+            id: uuid(),
+            direction: 'inbound',
+            channel,
+            text: replyText,
+            createdAt: new Date().toISOString(),
+          };
+          const c = mockConvos.get(convoId);
+          if (c) c.messages.push(reply);
+          io.emit('sms:inbound', {
+            sid: reply.id,
+            contactId,
+            text: reply.text,
+            at: reply.createdAt,
+          });
+          return { sid: reply.id };
+        },
+      });
+    } catch (e) {
+      console.warn('[agentHandle mock]', e?.message || e);
     }
   })();
 
-  return res.json({ ok:true, conversationId: convoId, message: msg });
-});
+  // ✅ send immediate response for the POST
+  return res.json({ ok: true, conversationId: convoId, message: msg });
+}); // <-- closes /api/mock/ghl/send-message
 
 app.get('/api/mock/ghl/contact/:contactId/conversations', (req, res) => {
   const contactId = req.params.contactId;
@@ -936,40 +1064,52 @@ async function handleBookAppointment(req, res) {
     });
 
     // Ensure we have coordinates
-    let latNum = Number(lat);
-    let lngNum = Number(lng);
-    const missingOrZero =
-      !Number.isFinite(latNum) || !Number.isFinite(lngNum) || (latNum === 0 && lngNum === 0);
+let latNum = Number(lat);
+let lngNum = Number(lng);
+const missingOrZero =
+  !Number.isFinite(latNum) || !Number.isFinite(lngNum) || (latNum === 0 && lngNum === 0);
 
-    if (missingOrZero && address) {
-      try {
-        const geo = await geocodeAddress(address);
-        if (geo) { latNum = geo.lat; lngNum = geo.lng; }
-      } catch (e) {
-        console.warn('[Geocode] create-appointment lookup failed:', e.message);
-      }
-    }
+if (missingOrZero && address) {
+  try {
+    const geo = await geocodeAddress(address);
+    if (geo) { latNum = geo.lat; lngNum = geo.lng; }
+  } catch (e) {
+    console.warn('[Geocode] create-appointment lookup failed:', e.message);
+  }
+}
 
-    // Store job locally
-    const activeClientId = clientId || 'default';
-    if (!jobsByClient.has(activeClientId)) jobsByClient.set(activeClientId, new Map());
-    const jobs = jobsByClient.get(activeClientId);
+// Build a **fully-enriched contact** for the job
+let contactNorm = normalizeContact({ id: contactId, ...(contact || {}) });
+try {
+  const enriched = await getContact(contactId, {
+    email: (contact && contact.email) || undefined,
+    phone: (contact && contact.phone) || undefined,
+  });
+  contactNorm = normalizeContact({ ...contactNorm, ...(enriched || {}) });
+} catch (e) {
+  // soft-fail: keep whatever we already have
+}
 
-    const job = {
-      appointmentId: created?.id || created?.appointmentId || 'ghl-unknown',
-      address,
-      lat: Number.isFinite(latNum) ? latNum : 0,
-      lng: Number.isFinite(lngNum) ? lngNum : 0,
-      startTime: startISO,
-      endTime: endISO,
-      jobType,
-      estValue: Number(estValue) || 0,
-      territory,
-      contact: normalizeContact({ id: contactId, ...(contact || {}) }),
-    };
+// Store job locally
+const activeClientId = clientId || 'default';
+if (!jobsByClient.has(activeClientId)) jobsByClient.set(activeClientId, new Map());
+const jobs = jobsByClient.get(activeClientId);
 
-    jobs.set(job.appointmentId, job);
-    io.emit('job:created', job);
+const job = {
+  appointmentId: created?.id || created?.appointmentId || 'ghl-unknown',
+  address,
+  lat: Number.isFinite(latNum) ? latNum : 0,
+  lng: Number.isFinite(lngNum) ? lngNum : 0,
+  startTime: ensureOffsetISO(startTime),
+  endTime: ensureOffsetISO(endTime),
+  jobType,
+  estValue: Number(estValue) || 0,
+  territory,
+  contact: contactNorm, // <-- now includes phones/emails/name when available
+};
+
+jobs.set(job.appointmentId, job);
+io.emit('job:created', job);
 
     // ---------------- AI ranking lives HERE ----------------
     if (SHOULD_SEED_DEMO) ensureDemoTechs(activeClientId);

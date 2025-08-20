@@ -2,7 +2,8 @@
 import { useEffect, useState } from 'react'
 import { Phone, Mail, MapPin, Tag, Building2 } from 'lucide-react'
 import { API_BASE } from '../config'
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router-dom'
+import JobMessages from './JobMessages'
 
 // ---------- helpers ----------
 function addrToString(a) {
@@ -15,10 +16,8 @@ function addrToString(a) {
   return parts[0] || ''
 }
 
-// Unify contact shape (accept many possible field names)
 function normalizeContact(raw = {}) {
   const id = raw.id ?? raw.contactId ?? raw._id ?? null
-
   const phonesArr = Array.isArray(raw.phones) ? raw.phones : []
   const extraPhones = [raw.phone, raw.mobile, raw.primaryPhone].filter(Boolean)
   const phones = [...phonesArr, ...extraPhones].filter(Boolean)
@@ -33,7 +32,7 @@ function normalizeContact(raw = {}) {
     company: raw.company || null,
     phones,
     emails,
-    address: raw.address ?? null, // string or object; UI handles both
+    address: raw.address ?? null,
     tags: Array.isArray(raw.tags) ? raw.tags : [],
     custom: raw.custom || {},
     pipeline: raw.pipeline || null,
@@ -41,19 +40,22 @@ function normalizeContact(raw = {}) {
 }
 
 // Unify job shape; also pull contact fields from job root if present
-function normalizeJob(d = {}, seed = {}) {
-  const startTime = d.startTime || seed.startTime || new Date().toISOString()
+function normalizeJob(raw = {}, seed = {}) {
+  // NEW: unwrap { items: {...} } if present
+  const d = raw?.items ?? raw;
+
+  const startTime = d.startTime || seed.startTime || new Date().toISOString();
   const endTime =
-    d.endTime || seed.endTime || new Date(Date.now() + 3600000).toISOString()
+    d.endTime || seed.endTime || new Date(Date.now() + 3600000).toISOString();
 
   const contactFromRoot = {
     id: d.contactId ?? seed.contactId,
     name: d.contactName ?? seed.contactName,
     phone: d.phone ?? d.contactPhone ?? seed.phone,
     email: d.email ?? d.contactEmail ?? seed.email,
-  }
+  };
 
-  const contact = normalizeContact({ ...(d.contact || {}), ...contactFromRoot })
+  const contact = normalizeContact({ ...(d.contact || {}), ...contactFromRoot });
 
   return {
     appointmentId: d.appointmentId || d.id || seed.appointmentId || seed.id || '—',
@@ -74,14 +76,14 @@ function normalizeJob(d = {}, seed = {}) {
     startTime,
     endTime,
     contact,
-  }
+  };
 }
 
 function Row({ label, children }) {
   return (
     <div className="flex items-start gap-2 text-sm">
-  <div className="w-24 shrink-0 text-white/60">{label}</div>      
-  <div className="flex-1">{children}</div>
+      <div className="w-24 shrink-0 text-white/60">{label}</div>
+      <div className="flex-1">{children}</div>
     </div>
   )
 }
@@ -90,85 +92,38 @@ function Row({ label, children }) {
 export default function JobDetails({ jobId, seed, onClose }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
-  const [convo, setConvo] = useState({ loading: false, messages: null, error: null })
+
   const assignedUserId  = data?.assignedUserId ?? null
   const assignedRepName = data?.assignedRepName ?? null
   const assignedLabel   = assignedRepName ?? (assignedUserId ? `#${assignedUserId}` : 'Unassigned')
-  
-  // Load job; use the normalizer
-  useEffect(() => {
-    let alive = true
-    ;(async () => {
-      try {
-        const r = await fetch(`${API_BASE}/api/job/${encodeURIComponent(jobId)}`)
-        if (!r.ok) throw new Error('no job')
-        const d = await r.json()
-        if (!alive) return
-        setData(normalizeJob(d, seed))
-      } catch {
-        if (!alive) return
-        setData(normalizeJob({}, seed)) // fallback to seed
-      } finally {
-        if (alive) setLoading(false)
-      }
-    })()
-    return () => {
-      alive = false
-    }
-  }, [jobId, seed])
 
-  async function openConversation() {
-    const contactId = data?.contact?.id
-    if (!contactId) {
-      setConvo({ loading: false, messages: null, error: 'No contactId on this job.' })
-      return
-    }
+useEffect(() => {
+  let alive = true;
+  (async () => {
     try {
-      setConvo((s) => ({ ...s, loading: true, error: null }))
+      const r = await fetch(`${API_BASE}/api/job/${encodeURIComponent(jobId)}`);
+      if (!r.ok) throw new Error('no job');
+      const d = await r.json();
+      if (!alive) return;
 
-      // Try to find an existing conversation for contact
-      const r1 = await fetch(
-        `${API_BASE}/api/mock/ghl/contact/${encodeURIComponent(contactId)}/conversations`
-      )
-      const j1 = await r1.json()
-      let convoId = j1?.conversations?.[0]?.id
+      // handle both shapes: {ok:true, items:{...}} or just {...}
+      const payload = d?.items ?? d;
 
-      // If none, create one by sending a seed message
-      if (!convoId) {
-        const r2 = await fetch(`${API_BASE}/api/mock/ghl/send-message`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contactId,
-            text: '(test) First message',
-            direction: 'outbound',
-          }),
-        })
-        const j2 = await r2.json()
-        convoId = j2.conversationId
-      }
-
-      // Load its messages
-      const r3 = await fetch(
-        `${API_BASE}/api/mock/ghl/conversation/${encodeURIComponent(convoId)}/messages`
-      )
-      const j3 = await r3.json()
-      setConvo({ loading: false, messages: j3.messages || [], error: null })
-    } catch (e) {
-      setConvo({
-        loading: false,
-        messages: null,
-        error: e?.message || 'Failed to load conversation',
-      })
+      setData(normalizeJob(payload, seed));
+    } catch {
+      if (!alive) return;
+      setData(normalizeJob({}, seed));
+    } finally {
+      if (alive) setLoading(false);
     }
-  }
+  })();
+  return () => { alive = false };
+}, [jobId, seed]);
 
   if (loading) return <div className="p-4 text-sm text-white/60">Loading…</div>
   if (!data) return <div className="p-4 text-sm text-white/60">Not found.</div>
 
-  // ⬇️ Normalize the contact here so phones/emails are arrays
   const c = normalizeContact(data?.contact || {})
-
   const jobAddr = addrToString(data.address)
   const contactAddr = addrToString(c.address)
   const showBoth = jobAddr && contactAddr && jobAddr !== contactAddr
@@ -178,24 +133,12 @@ export default function JobDetails({ jobId, seed, onClose }) {
   const dEnd = data.endTime ? new Date(data.endTime) : new Date(dStart.getTime() + 60 * 60 * 1000)
 
   const dateStr = dStart.toLocaleDateString(undefined, {
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-    timeZone: tz,
+    weekday: 'short', month: 'short', day: 'numeric', timeZone: tz,
   })
-  const startStr = dStart.toLocaleTimeString(undefined, {
-    hour: 'numeric',
-    minute: '2-digit',
-    timeZone: tz,
-  })
-  const endStr = dEnd.toLocaleTimeString(undefined, {
-    hour: 'numeric',
-    minute: '2-digit',
-    timeZone: tz,
-  })
+  const startStr = dStart.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', timeZone: tz })
+  const endStr   = dEnd.toLocaleTimeString(undefined,   { hour: 'numeric', minute: '2-digit', timeZone: tz })
 
-  const travelMinutes =
-    typeof data.travelMinutesFromPrev === 'number' ? data.travelMinutesFromPrev : null
+  const travelMinutes = typeof data.travelMinutesFromPrev === 'number' ? data.travelMinutesFromPrev : null
 
   return (
     <div className="fixed inset-0 z-[500] flex">
@@ -215,6 +158,9 @@ export default function JobDetails({ jobId, seed, onClose }) {
         </div>
 
         <div className="grid grid-cols-1 gap-3">
+          {/* Messages for this job’s contact */}
+          <JobMessages jobId={jobId} />
+
           {/* Contact */}
           <div className="glass rounded-none p-3">
             <div className="flex items-center justify-between">
@@ -222,30 +168,27 @@ export default function JobDetails({ jobId, seed, onClose }) {
                 <div className="text-xs text-white/60">Contact</div>
                 <div className="text-base font-semibold">{c.name || '—'}</div>
               </div>
-<div className="flex items-center gap-2">
-  {c.company && (
-    <div className="text-xs text-white/70 flex items-center gap-2">
-      <Building2 size={14} />
-      {c.company}
-    </div>
-  )}
 
- <Link
-  to={c.id ? `/chatter/${encodeURIComponent(c.id)}` : '#'}
-  onClick={(e) => {
-    if (!c.id) { e.preventDefault(); return; }
-    onClose?.();           // ← close drawer on nav
-  }}
-  className={`px-2 py-1 rounded-none glass text-xs ${c.id ? 'hover:bg-panel/70' : 'opacity-50 pointer-events-none'}`}
-  title={c.id ? 'Open conversation' : 'No contact ID'}
->
-  View Conversation
-</Link>
-</div>
+              <div className="flex items-center gap-2">
+                {c.company && (
+                  <div className="text-xs text-white/70 flex items-center gap-2">
+                    <Building2 size={14} />
+                    {c.company}
+                  </div>
+                )}
 
-
-
-              
+                <Link
+                  to={c.id ? `/chatter/${encodeURIComponent(c.id)}` : '#'}
+                  onClick={(e) => {
+                    if (!c.id) { e.preventDefault(); return }
+                    onClose?.()
+                  }}
+                  className={`px-2 py-1 rounded-none glass text-xs ${c.id ? 'hover:bg-panel/70' : 'opacity-50 pointer-events-none'}`}
+                  title={c.id ? 'Open conversation' : 'No contact ID'}
+                >
+                  View Conversation
+                </Link>
+              </div>
             </div>
 
             <div className="mt-3 space-y-2">
@@ -253,11 +196,7 @@ export default function JobDetails({ jobId, seed, onClose }) {
                 <div className="flex items-center gap-2 flex-wrap">
                   {c.phones?.length ? (
                     c.phones.map((p, i) => (
-                      <a
-                        key={i}
-                        href={`tel:${p}`}
-                        className="text-white/90 hover:underline flex items-center gap-1"
-                      >
+                      <a key={i} href={`tel:${p}`} className="text-white/90 hover:underline flex items-center gap-1">
                         <Phone size={14} />
                         {p}
                       </a>
@@ -272,11 +211,7 @@ export default function JobDetails({ jobId, seed, onClose }) {
                 <div className="flex items-center gap-2 flex-wrap">
                   {c.emails?.length ? (
                     c.emails.map((e, i) => (
-                      <a
-                        key={i}
-                        href={`mailto:${e}`}
-                        className="text-white/90 hover:underline flex items-center gap-1"
-                      >
+                      <a key={i} href={`mailto:${e}`} className="text-white/90 hover:underline flex items-center gap-1">
                         <Mail size={14} />
                         {e}
                       </a>
@@ -303,10 +238,7 @@ export default function JobDetails({ jobId, seed, onClose }) {
                 <Row label="Tags">
                   <div className="flex items-center gap-1.5 flex-wrap">
                     {c.tags.map((t, i) => (
-                      <span
-                        key={i}
-                        className="px-1.5 py-0.5 rounded-none text-[11px] bg-white/10 flex items-center gap-1"
-                      >
+                      <span key={i} className="px-1.5 py-0.5 rounded-none text-[11px] bg-white/10 flex items-center gap-1">
                         <Tag size={12} />
                         {t}
                       </span>
@@ -335,31 +267,6 @@ export default function JobDetails({ jobId, seed, onClose }) {
                   </div>
                 </Row>
               )}
-
-              {convo.loading && (
-                <div className="mt-3 text-xs text-white/60">Loading conversation…</div>
-              )}
-              {convo.error && <div className="mt-3 text-xs text-red-400">{convo.error}</div>}
-              {Array.isArray(convo.messages) && (
-                <div className="mt-3 border-t border-white/10 pt-2">
-                  <div className="text-xs text-white/60 mb-1">Conversation</div>
-                  <div className="space-y-1 max-h-40 overflow-auto pr-1">
-                    {convo.messages.length === 0 && (
-                      <div className="text-xs text-white/50">No messages yet.</div>
-                    )}
-                    {convo.messages.map((m) => (
-                      <div key={m.id} className="text-xs">
-                        <span className="text-white/50">
-                          {new Date(m.createdAt).toLocaleString()} • {m.direction}
-                        </span>
-                        <div className="text-white/90">
-                          {m.text || <span className="text-white/50">(no text)</span>}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
             </div>
           </div>
 
@@ -383,8 +290,8 @@ export default function JobDetails({ jobId, seed, onClose }) {
               Territory: <span className="text-white/90">{data.territory}</span>
             </div>
             <div className="mt-1 text-sm">
-            Assigned to: <span className="text-white/90">{assignedLabel}</span>
-           </div>
+              Assigned to: <span className="text-white/90">{assignedLabel}</span>
+            </div>
             <div className="mt-1 text-sm">
               Window:{' '}
               <span className="text-white/90">
