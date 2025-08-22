@@ -27,8 +27,53 @@ import { SuggestTimesRequestSchema, CreateAppointmentReqSchema, UpsertTechsReque
 import { generateEstimateItems, draftEstimateCopy } from './lib/estimate-llm.ts'
 import { aiEstimate } from "./lib/estimate.ts";
 import contactsRouter from './routes/contacts.ts';
+import rateLimit from 'express-rate-limit';
 
-const geocodeCache = new Map();
+function ttlMap(ttlMs, opts = {}) {
+  const max = Number.isFinite(opts.max) ? opts.max : null;
+  const normalizeKey = typeof opts.normalizeKey === 'function' ? opts.normalizeKey : (k) => k;
+
+  // Use a Map to keep insertion order (LRU via re-insert on get/set)
+  const store = new Map(); // key -> { v, t }
+
+  const api = {
+    get(key) {
+      const k = normalizeKey(key);
+      const row = store.get(k);
+      if (!row) return null;
+      if (Date.now() - row.t > ttlMs) { store.delete(k); return null; }
+      // refresh LRU position
+      store.delete(k);
+      store.set(k, { v: row.v, t: row.t });
+      return row.v;
+    },
+    set(key, value) {
+      const k = normalizeKey(key);
+      store.set(k, { v: value, t: Date.now() });
+      // enforce max size (delete oldest)
+      if (max && store.size > max) {
+        const oldestKey = store.keys().next().value;
+        store.delete(oldestKey);
+      }
+    },
+    has(key) {
+      return api.get(key) != null;
+    },
+    delete(key) {
+      const k = normalizeKey(key);
+      return store.delete(k);
+    },
+    clear() { store.clear(); },
+    size() { return store.size; },
+  };
+
+  return api;
+}
+
+const geocodeCache = ttlMap(24 * 60 * 60 * 1000, {
+  max: 10000,
+  normalizeKey: (addr) => String(addr || '').trim().toLowerCase(),
+});
 const app = express()
 const server = http.createServer(app)
 const CHATTER_AI = process.env.CHATTER_AI === 'true';
@@ -55,8 +100,18 @@ async function geocodeAddress(address) {
 
   return null;  // ✅ fallback if nothing comes back
 }
-// --- Distance Matrix (drive time) helper ---
-const driveCache = new Map(); // key: "lat1,lng1|lat2,lng2" -> minutes
+
+// Replace your current driveCache line with:
+const q = (n) => Number(n).toFixed(4); // ~11m at the equator
+const driveCache = ttlMap(6 * 60 * 60 * 1000, {
+  max: 20000,
+  normalizeKey: (k) => {
+    if (typeof k === 'string') return k;
+    const { from, to } = k || {};
+    if (!from || !to) return '∅';
+    return `${q(from.lat)},${q(from.lng)}|${q(to.lat)},${q(to.lng)}`;
+  },
+});
 
 async function getDriveMinutes(from, to) {
   if (!from || !to) return null;
@@ -64,9 +119,9 @@ async function getDriveMinutes(from, to) {
   const t = `${to.lat},${to.lng}`;
   if (!/^-?\d+(\.\d+)?,\-?\d+(\.\d+)?$/.test(f) || !/^-?\d+(\.\d+)?,\-?\d+(\.\d+)?$/.test(t)) return null;
 
-  const key = `${f}|${t}`;
-  const hit = driveCache.get(key);
-  if (hit) return hit;
+  // Ask cache first (pass structured key so the normalizer can quantize)
+  const hit = driveCache.get({ from, to });
+  if (hit != null) return hit;
 
   const apiKey = process.env.GOOGLE_MAPS_API_KEY;
   if (!apiKey) return null;
@@ -79,7 +134,7 @@ async function getDriveMinutes(from, to) {
     const seconds = elem?.duration_in_traffic?.value ?? elem?.duration?.value;
     if (typeof seconds === 'number') {
       const minutes = Math.round(seconds / 60);
-      driveCache.set(key, minutes);
+      driveCache.set({ from, to }, minutes);
       return minutes;
     }
   } catch (e) {
@@ -93,8 +148,13 @@ const techsByClient = new Map(); // clientId -> tech array
 const jobsByClient  = new Map(); // clientId -> Map(appointmentId -> job)
 const vehiclesByClient = new Map(); // clientId -> [{id,name,plate,capacity}]
 const newId = (p='id_') => p + Math.random().toString(36).slice(2);
+const contactsByClient = new Map(); // clientId -> Map(contactId -> contactSummary)
 
-
+// helper to get/create the per-client contacts bag
+function contactBag(clientId = 'default') {
+  if (!contactsByClient.has(clientId)) contactsByClient.set(clientId, new Map());
+  return contactsByClient.get(clientId);
+}
 
 // --- Per-contact Chat AI state (autopilot) ---
 const autopilotPref = new Map(); // key = id or phone (E.164), value = boolean
@@ -446,7 +506,7 @@ const NOM_TTL_MS = 12 * 60 * 60 * 1000; // 12h cache
 
 app.get('/api/geo/search', async (req, res) => {
   try {
-    const q = String(req.query.q || '').trim();
+    const q = String(req.query.q || '').trim().slice(0, 200);
     if (!q) return res.json([]);
 
     const key = q.toLowerCase();
@@ -730,20 +790,24 @@ app.post('/twilio/sms', express.urlencoded({ extended: false }), async (req, res
   }
 });
 
-// NEW: aggregate contacts from current jobs in memory
+// NEW: aggregate contacts from (A) manual seeds + (B) current jobs in memory
 app.get('/api/contacts', (req, res) => {
   try {
     const clientId = (req.query.clientId || 'default').trim();
-    const jobs = jobsByClient.get(clientId) || new Map();
 
-    const map = new Map(); // contactId -> summary
+    // A) start with any manually-seeded contacts
+    const manual = contactsByClient.get(clientId) || new Map();
+    const map = new Map(manual); // contactId -> summary
+
+    // B) merge in contacts derived from jobs
+    const jobs = jobsByClient.get(clientId) || new Map();
     for (const j of jobs.values()) {
       const c = normalizeContact(j.contact || {});
       if (!c.id) continue;
 
       const cur = map.get(c.id) || {
         id: c.id,
-        name: c.name,
+        name: c.name || '—',
         company: c.company || null,
         phones: [],
         emails: [],
@@ -753,13 +817,13 @@ app.get('/api/contacts', (req, res) => {
         appointments: 0,
       };
 
-      // merge phones/emails uniquely
-      const uniq = (a) => Array.from(new Set(a.filter(Boolean)));
-      cur.phones = uniq([...cur.phones, ...(c.phones || [])]);
-      cur.emails = uniq([...cur.emails, ...(c.emails || [])]);
+      // unique merge for phones/emails
+      const uniq = a => Array.from(new Set(a.filter(Boolean)));
+      cur.phones = uniq([...(cur.phones || []), ...(c.phones || [])]);
+      cur.emails = uniq([...(cur.emails || []), ...(c.emails || [])]);
 
       // last appt + count
-      cur.appointments += 1;
+      cur.appointments = (cur.appointments || 0) + 1;
       const t = new Date(j.startTime || 0).getTime();
       const prev = new Date(cur.lastAppointmentAt || 0).getTime();
       if (t > prev) cur.lastAppointmentAt = j.startTime || cur.lastAppointmentAt;
@@ -776,6 +840,163 @@ app.get('/api/contacts', (req, res) => {
     res.status(500).json({ ok: false, error: 'failed to build contacts list' });
   }
 });
+
+// GET all dispositions for a contact (returns [] if none / jobs-only contact)
+app.get('/api/contacts/:id/dispositions', (req, res) => {
+  const clientId = (req.query.clientId || 'default').trim();
+  const id = req.params.id;
+
+  // ensure bag
+  if (!contactsByClient.has(clientId)) contactsByClient.set(clientId, new Map());
+  const bag = contactsByClient.get(clientId);
+
+  let row = bag.get(id);
+
+  // If missing, try to derive from jobs (mirror POST behavior)
+  if (!row) {
+    const jobsMap = jobsByClient.get(clientId) || new Map();
+    const jobs = Array.from(jobsMap.values())
+      .filter(j => (j?.contact?.id || j?.contactId) === id)
+      .sort((a,b) => new Date(b.startTime) - new Date(a.startTime));
+
+    if (jobs.length) {
+      const j0 = jobs[0];
+      const c  = normalizeContact(j0.contact || {});
+      row = {
+        id,
+        name: c.name || '—',
+        company: c.company || null,
+        phones: Array.isArray(c.phones) ? c.phones.filter(Boolean) : [],
+        emails: Array.isArray(c.emails) ? c.emails.filter(Boolean) : [],
+        address: c.address || null,
+        tags: [],
+        kind: c.pipeline || undefined,
+        lastAppointmentAt: j0.startTime || null,
+        appointments: jobs.length,
+        lastDisposition: null,
+        dispositions: [],
+      };
+      bag.set(id, row);
+    }
+  }
+
+  // If still nothing, return empty history (not an error)
+  if (!row) return res.json({ ok:true, contactId:id, dispositions: [] });
+
+  const list = Array.isArray(row.dispositions) ? row.dispositions : [];
+  res.json({ ok:true, contactId:id, dispositions: list });
+});
+
+// POST /api/contacts/:id/dispositions  → { key, label, note?, clientId? }
+app.post('/api/contacts/:id/dispositions', (req, res) => {
+  try {
+    const clientId = (req.body.clientId || req.query.clientId || 'default').trim();
+    const id = req.params.id;
+    const { key, label, note } = req.body || {};
+    if (!key || !label) {
+      return res.status(400).json({ ok:false, error:'key and label are required' });
+    }
+
+    // ensure a per-client bag
+    if (!contactsByClient.has(clientId)) contactsByClient.set(clientId, new Map());
+    const bag = contactsByClient.get(clientId);
+
+    // try to load existing
+    let row = bag.get(id);
+
+    // If missing, auto-seed a minimal summary from jobs for this contact
+    if (!row) {
+      const jobsMap = jobsByClient.get(clientId) || new Map();
+      // find the newest job for this contact to grab some context
+      const jobs = Array.from(jobsMap.values())
+        .filter(j => (j?.contact?.id || j?.contactId) === id)
+        .sort((a,b) => new Date(b.startTime) - new Date(a.startTime));
+
+      if (jobs.length) {
+        const j0 = jobs[0];
+        const c  = normalizeContact(j0.contact || {});
+        row = {
+          id,
+          name: c.name || '—',
+          company: c.company || null,
+          phones: Array.isArray(c.phones) ? c.phones.filter(Boolean) : [],
+          emails: Array.isArray(c.emails) ? c.emails.filter(Boolean) : [],
+          address: c.address || null,
+          tags: [],
+          kind: c.pipeline || undefined,
+          lastAppointmentAt: j0.startTime || null,
+          appointments: jobs.length,
+          lastDisposition: null,
+          dispositions: [],
+        };
+        bag.set(id, row);
+      }
+    }
+
+    if (!row) {
+      // Still nothing to seed from—fail clearly
+      return res.status(404).json({ ok:false, error:'contact not found (seed first via /api/contacts or create a job with this contact)' });
+    }
+
+    // make sure the arrays exist
+    row.dispositions = Array.isArray(row.dispositions) ? row.dispositions : [];
+
+    const entry = {
+      key: String(key),
+      label: String(label),
+      note: note ? String(note) : undefined,
+      at: new Date().toISOString(),
+    };
+
+    row.dispositions.push(entry);
+    row.lastDisposition = entry;
+
+    bag.set(id, row);
+    return res.status(201).json({ ok:true, entry });
+  } catch (e) {
+    console.error('[contacts disposition]', e);
+    return res.status(500).json({ ok:false, error:'failed to save disposition' });
+  }
+});
+
+// Create/seed a contact for the prototype
+app.post('/api/contacts', (req, res) => {
+  try {
+    const clientId = (req.body.clientId || 'default').trim();
+    const b = req.body || {};
+
+    if (!b.id || !b.name) {
+      return res.status(400).json({ ok:false, error:'id and name are required' });
+    }
+
+    if (!contactsByClient.has(clientId)) contactsByClient.set(clientId, new Map());
+    const bag = contactsByClient.get(clientId);
+
+    const phones = Array.isArray(b.phones) ? b.phones.filter(Boolean) : [];
+    const emails = Array.isArray(b.emails) ? b.emails.filter(Boolean) : [];
+
+    const summary = {
+      id: String(b.id),
+      name: String(b.name),
+      company: b.company || null,
+      phones,
+      emails,
+      address: b.address || null,
+      tags: Array.isArray(b.tags) ? b.tags : [],
+      kind: b.kind || undefined,
+      lastAppointmentAt: b.lastAppointmentAt || null,
+      appointments: Number.isFinite(b.appointments) ? Number(b.appointments) : 0,
+    };
+
+    bag.set(summary.id, summary);
+    return res.status(201).json({ ok:true, contact: summary });
+  } catch (e) {
+    console.error('[POST /api/contacts]', e);
+    return res.status(500).json({ ok:false, error:'failed to save contact' });
+  }
+});
+
+
 
 // List all appointments for a given contact (uses in-memory jobs store)
 app.get('/api/contacts/:contactId/appointments', (req, res) => {

@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@floating-ui/react": "^0.27.16",
     "@turf/turf": "^7.2.0",
     "@types/leaflet-draw": "^1.0.12",
     "leaflet": "^1.9.4",

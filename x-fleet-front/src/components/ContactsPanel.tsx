@@ -1,14 +1,63 @@
-// src/components/ContactsPanel.jsx
-import { useEffect, useMemo, useState } from 'react'
+// src/components/ContactsPanel.tsx
+import React, { useEffect, useMemo, useState } from 'react'
 import {
   User, Phone, Mail, MapPin, CalendarDays, ChevronDown,
-  MessageSquare, FileText, Plus
+  MessageSquare, FileText, Plus, Info
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import JobDetails from './JobDetails'
+import DispositionButton from './DispositionButton'
 import { API_BASE } from '../config'
 
-function Chip({ children, title, className = '' }) {
+type DispositionEntry = {
+  key: string
+  label: string
+  note?: string
+  at: string
+}
+
+type ContactRecord = {
+  id: string
+  name?: string
+  company?: string
+  phones?: string[]
+  emails?: string[]
+  address?: string
+  kind?: string
+  type?: string
+  lastAppointmentAt?: string
+  appointments?: number
+  // server-reflected extras
+  lastDisposition?: DispositionEntry | null
+  dispositions?: DispositionEntry[]
+}
+
+type Appointment = {
+  appointmentId: string
+  address?: string
+  startTime?: string
+  endTime?: string
+  jobType?: string
+  estValue?: number
+  territory?: string
+}
+
+type ContactsPanelProps = {
+  query?: string
+  sortBy?: 'recent' | 'name'
+  segment?: 'all' | 'customers' | 'leads'
+  onCreateContact?: () => void
+}
+
+function Chip({
+  children,
+  title,
+  className = '',
+}: {
+  children: React.ReactNode
+  title?: string
+  className?: string
+}) {
   return (
     <span
       title={title}
@@ -24,34 +73,40 @@ function Chip({ children, title, className = '' }) {
   )
 }
 
-const normalizePhone = (p = '') => {
+const normalizePhone = (p: string = ''): string => {
   let s = String(p).replace(/[^\d]/g, '')
   if (s.length === 10) s = '1' + s
   if (!s.startsWith('+')) s = '+' + s
   return s
 }
 
+// Coerce any payload into a valid DispositionEntry
+function normalizeDispo(d: any): DispositionEntry {
+  return {
+    key: d?.key ?? d?.value ?? 'unknown',
+    label: d?.label ?? d?.text ?? String(d?.key ?? 'Disposition'),
+    note: d?.note ?? undefined,
+    at: d?.at ?? new Date().toISOString(),
+  }
+}
+
 export default function ContactsPanel({
-  showToolbar = true,
-  query: externalQuery,
-  sortBy: externalSortBy,
-  segment: externalSegment, // 'all' | 'customers' | 'leads'
-}) {
+  query: externalQuery = '',
+  sortBy: externalSortBy = 'recent',
+  segment: externalSegment = 'all',
+  onCreateContact,
+}: ContactsPanelProps) {
   const navigate = useNavigate()
 
-  const [contacts, setContacts] = useState([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(null)
+  const [contacts, setContacts] = useState<ContactRecord[]>([])
+  const [loading, setLoading] = useState<boolean>(true)
+  const [error, setError] = useState<string | null>(null)
 
-  const [expanded, setExpanded] = useState({})
-  const [apptsByContact, setApptsByContact] = useState({})
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+  const [apptsByContact, setApptsByContact] = useState<Record<string, Appointment[]>>({})
 
-  const [openId, setOpenId] = useState(null)
-  const [openSeed, setOpenSeed] = useState(null)
-
-  // internal (used only if not provided by parent)
-  const [query, setQuery] = useState('')
-  const [sortBy, setSortBy] = useState('recent')
+  const [openId, setOpenId] = useState<string | null>(null)
+  const [openSeed, setOpenSeed] = useState<any>(null)
 
   useEffect(() => {
     let alive = true
@@ -61,38 +116,40 @@ export default function ContactsPanel({
         if (!r.ok) throw new Error('Failed to load contacts')
         const j = await r.json()
         if (!alive) return
-        setContacts(j.contacts || [])
-      } catch (e) {
+        setContacts((j.contacts || []) as ContactRecord[])
+      } catch (e: any) {
         if (!alive) return
-        setError(e.message || 'Load error')
+        setError(e?.message || 'Load error')
       } finally {
         if (alive) setLoading(false)
       }
     })()
-    return () => { alive = false }
+    return () => {
+      alive = false
+    }
   }, [])
 
-  async function toggleContact(c) {
+  async function toggleContact(c: ContactRecord) {
     setExpanded(s => ({ ...s, [c.id]: !s[c.id] }))
     if (!apptsByContact[c.id]) {
       try {
         const r = await fetch(`${API_BASE}/api/contacts/${encodeURIComponent(c.id)}/appointments`)
         const j = await r.json()
-        setApptsByContact(m => ({ ...m, [c.id]: j.appointments || [] }))
+        setApptsByContact(m => ({ ...m, [c.id]: (j.appointments || []) as Appointment[] }))
       } catch {
         setApptsByContact(m => ({ ...m, [c.id]: [] }))
       }
     }
   }
 
-  function openMessages(c) {
+  function openMessages(c: ContactRecord) {
     const phone = (c.phones && c.phones[0]) || ''
     const threadId = c.id || (phone ? `manual:${normalizePhone(phone)}` : '')
     if (!threadId) return
     navigate(`/chatter/${encodeURIComponent(threadId)}`)
   }
 
-  function openEstimator(c) {
+  function openEstimator(c: ContactRecord) {
     localStorage.setItem('estimatorPrefill', JSON.stringify({
       contact: {
         id: c.id,
@@ -105,20 +162,19 @@ export default function ContactsPanel({
     navigate('/estimator?pack=general')
   }
 
-  function openNewJob(c) {
+  function openNewJob(c: ContactRecord) {
     if (!c.id) return
     navigate(`/jobs/new?contactId=${encodeURIComponent(c.id)}`)
   }
 
-  // derived list (uses external filters if provided)
+  // derived list (uses parent-provided filters only)
   const list = useMemo(() => {
-    const q = (externalQuery ?? query).trim().toLowerCase()
-    const sb = externalSortBy ?? sortBy
-    const seg = externalSegment ?? 'all'
+    const q = externalQuery.trim().toLowerCase()
+    const sb = externalSortBy
+    const seg = externalSegment
 
     let arr = contacts
 
-    // segment filter (support c.kind or c.type)
     if (seg !== 'all') {
       arr = arr.filter(c => {
         const kind = (c.kind || c.type || '').toString().toLowerCase()
@@ -136,7 +192,10 @@ export default function ContactsPanel({
           ...(c.phones || []),
           ...(c.emails || []),
           c.address,
-        ].filter(Boolean).join(' ').toLowerCase()
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase()
         return hay.includes(q)
       })
     }
@@ -152,43 +211,13 @@ export default function ContactsPanel({
       })
     }
     return arr
-  }, [contacts, query, sortBy, externalQuery, externalSortBy, externalSegment])
+  }, [contacts, externalQuery, externalSortBy, externalSegment])
 
   if (loading) return <div className="p-3 text-sm text-white/60">Loading contacts…</div>
   if (error)   return <div className="p-3 text-sm text-red-400">{error}</div>
 
   return (
     <div className="space-y-3">
-      {/* Optional internal toolbar (hidden when page provides one) */}
-      {showToolbar && (
-        <div className="flex flex-wrap items-center gap-2 justify-between border border-white/10 rounded-xl bg-white/[0.035] p-2">
-          <div className="flex items-center gap-2">
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search by name, phone, email, address…"
-              className="w-[min(52ch,70vw)] bg-black/30 border border-white/10 rounded-none px-2 py-2 text-sm outline-none focus:border-white/30"
-            />
-            <select
-              value={sortBy}
-              onChange={(e) => setSortBy(e.target.value)}
-              className="bg-black/30 border border-white/10 rounded-none px-2 py-2 text-sm"
-              title="Sort contacts"
-            >
-              <option value="recent">Sort: Recent first</option>
-              <option value="name">Sort: A → Z</option>
-            </select>
-          </div>
-          <button
-            className="px-3 py-1.5 text-sm rounded-none border border-white/15 bg-white/5 hover:bg-white/10 inline-flex items-center gap-2"
-            onClick={() => navigate('/contacts/new')}
-            title="Create a new contact"
-          >
-            <Plus size={16} /> New Contact
-          </button>
-        </div>
-      )}
-
       {/* Job modal */}
       {openId && (
         <JobDetails
@@ -204,7 +233,7 @@ export default function ContactsPanel({
           <div className="text-sm">No contacts.</div>
           <button
             className="mt-3 px-3 py-1.5 text-sm rounded-none border border-white/15 bg-white/5 hover:bg-white/10 inline-flex items-center gap-2"
-            onClick={() => navigate('/contacts/new')}
+            onClick={onCreateContact || (() => navigate('/contacts/new'))}
           >
             <Plus size={16} /> Add your first contact
           </button>
@@ -220,6 +249,10 @@ export default function ContactsPanel({
           const appts = apptsByContact[c.id] || []
           const isOpen = !!expanded[c.id]
 
+          const dispoTitle = c.lastDisposition
+            ? `${c.lastDisposition.label}${c.lastDisposition.note ? ` — ${c.lastDisposition.note}` : ''}\n${new Date(c.lastDisposition.at).toLocaleString()}`
+            : undefined
+
           return (
             <div key={c.id} className="rounded-xl border border-white/10 overflow-hidden">
               <button
@@ -231,6 +264,17 @@ export default function ContactsPanel({
                   <User size={16} className="text-white/70 shrink-0" />
                   <div className="font-semibold truncate">{c.name || '—'}</div>
                   {c.company && <Chip title="Company">{c.company}</Chip>}
+
+                  {/* Disposition badge */}
+                  {c.lastDisposition && (
+                    <Chip
+                      title={dispoTitle}
+                      className="bg-amber-500/15 text-amber-300 border border-amber-400/20"
+                    >
+                      <Info size={12} className="opacity-80" />
+                      {c.lastDisposition.label}
+                    </Chip>
+                  )}
                 </div>
                 <div className="flex items-center gap-2 text-xs text-white/70">
                   {phones[0] && (
@@ -287,6 +331,25 @@ export default function ContactsPanel({
                     >
                       <Plus size={14} /> New Job
                     </button>
+
+                    {/* Disposition */}
+                    <DispositionButton
+                      contactId={c.id}
+                      onDispo={(payload) => {
+                        const d = normalizeDispo(payload)
+                        setContacts(prev =>
+                          prev.map(row =>
+                            row.id === c.id
+                              ? {
+                                  ...row,
+                                  lastDisposition: d,
+                                  dispositions: [...(row.dispositions || []), d],
+                                }
+                              : row
+                          )
+                        )
+                      }}
+                    />
                   </div>
 
                   {/* Appointments */}

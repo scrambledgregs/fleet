@@ -1,16 +1,20 @@
 // src/pages/Estimator.tsx
 import React, { useMemo, useState, useEffect, useRef, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import { useNavigate, useLocation } from 'react-router-dom'
 import TopBar from '../components/TopBar.jsx'
 import SideNav from '../components/SideNav.jsx'
 import StatBar from '../components/StatBar.jsx'
 import { API_BASE } from '../config'
 import { PACKS } from '../packs'
+import DispositionButton, { DispositionPayload } from '../components/DispositionButton'
+
 
 import * as turf from '@turf/turf'
 import type { Feature, Polygon, Position } from 'geojson'
 import L from 'leaflet'
 import 'leaflet-draw' // runtime; we’ll cast handler types to any
+import { Send, Copy as CopyIcon, Eye, Loader2 } from 'lucide-react'
 
 import ProposalPreview from '../components/ProposalPreview'
 
@@ -93,7 +97,7 @@ function highlight(text: string, q: string) {
   )
 }
 
-/** A small, dependency-free searchable dropdown */
+/** A small, dependency-free searchable dropdown (portal-based) */
 function SearchableSelect<T extends { id: string; name: string }>({
   value,
   onSelect,
@@ -111,30 +115,70 @@ function SearchableSelect<T extends { id: string; name: string }>({
   loading?: boolean
   allowCreateLabel?: string | null
 }) {
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
   const [open, setOpen] = useState(false)
   const [q, setQ] = useState('')
   const [hover, setHover] = useState(0)
-  const boxRef = useRef<HTMLDivElement>(null)
 
-  useEffect(() => {
-    function onDoc(e: MouseEvent) {
-      if (!boxRef.current?.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', onDoc)
-    return () => document.removeEventListener('mousedown', onDoc)
-  }, [])
+  // Menu position (fixed, relative to viewport)
+  const [pos, setPos] = useState<{ left: number; top: number; width: number }>({
+    left: 0,
+    top: 0,
+    width: 0,
+  })
 
+  // Debounced search
   useEffect(() => {
     const t = setTimeout(() => onSearch(q), 180)
     return () => clearTimeout(t)
   }, [q, onSearch])
 
   const showCreate =
-    allowCreateLabel && q.trim().length >= 2 && !options.some(o => o.name.toLowerCase() === q.trim().toLowerCase())
+    !!allowCreateLabel &&
+    q.trim().length >= 2 &&
+    !options.some(o => o.name.toLowerCase() === q.trim().toLowerCase())
+
+  const updatePos = () => {
+    const el = triggerRef.current
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    const vw = window.innerWidth
+    const margin = 8
+    const maxW = Math.min(448, Math.floor(vw * 0.8))
+    const width = Math.max(Math.min(maxW, Math.floor(r.width)), 240)
+    let left = Math.min(r.left, vw - width - margin)
+    if (left < margin) left = margin
+    const top = r.bottom + 4
+    setPos({ left: Math.round(left), top: Math.round(top), width })
+  }
+
+  useEffect(() => {
+    if (!open) return
+    updatePos()
+    const onScroll = () => updatePos()
+    const onResize = () => updatePos()
+    window.addEventListener('scroll', onScroll, true)
+    window.addEventListener('resize', onResize)
+
+    const onDoc = (e: MouseEvent) => {
+      const t = e.target as Node
+      if (!triggerRef.current?.contains(t) && !menuRef.current?.contains(t)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => {
+      window.removeEventListener('scroll', onScroll, true)
+      window.removeEventListener('resize', onResize)
+      document.removeEventListener('mousedown', onDoc)
+    }
+  }, [open])
 
   return (
-    <div ref={boxRef} className="relative">
+    <div className="relative">
       <button
+        ref={triggerRef}
         type="button"
         className="w-full text-left bg-black/30 border border-white/10 rounded-none px-2 py-2 text-sm flex items-center justify-between"
         onClick={() => setOpen(o => !o)}
@@ -145,89 +189,113 @@ function SearchableSelect<T extends { id: string; name: string }>({
         <span className="text-white/40">▾</span>
       </button>
 
-      {open && (
-        <div className="absolute z-20 mt-1 w-[min(28rem,80vw)] bg-neutral-900 border border-white/10 rounded-none shadow-xl">
-          <div className="p-2 border-b border-white/10">
-            <input
-              autoFocus
-              value={q}
-              onChange={e => {
-                setQ(e.target.value)
-                setHover(0)
-              }}
-              onKeyDown={e => {
-                if (e.key === 'ArrowDown') {
-                  e.preventDefault()
-                  setHover(h => Math.min(h + 1, (options.length - 1) + (showCreate ? 1 : 0)))
-                } else if (e.key === 'ArrowUp') {
-                  e.preventDefault()
-                  setHover(h => Math.max(h - 1, 0))
-                } else if (e.key === 'Enter') {
-                  e.preventDefault()
-                  if (showCreate && hover === 0) {
-                    onSelect({ id: 'new', name: q.trim() } as T)
-                    setOpen(false)
-                    return
-                  }
-                  const idx = showCreate ? hover - 1 : hover
-                  const chosen = options[idx]
-                  if (chosen) {
-                    onSelect(chosen)
-                    setOpen(false)
-                  }
-                } else if (e.key === 'Escape') {
-                  setOpen(false)
-                }
-              }}
-              placeholder="Type to search…"
-              className="w-full bg-black/30 border border-white/10 rounded-none px-2 py-2 text-sm outline-none focus:border-white/30"
-            />
-          </div>
-
-          <div className="max-h-72 overflow-auto">
-            {loading && <div className="px-3 py-2 text-sm text-white/60">Searching…</div>}
-
-            {showCreate && (
-              <div
-                className={`px-3 py-2 text-sm cursor-pointer hover:bg-white/5 ${hover === 0 ? 'bg-white/10' : ''}`}
-                onMouseEnter={() => setHover(0)}
-                onClick={() => {
-                  onSelect({ id: 'new', name: q.trim() } as T)
-                  setOpen(false)
+      {open &&
+        createPortal(
+          <div
+            ref={menuRef}
+            style={{
+              position: 'fixed',
+              left: pos.left,
+              top: pos.top,
+              width: pos.width,
+              zIndex: 1000,
+            }}
+            className="bg-neutral-900 border border-white/10 rounded-none shadow-xl"
+          >
+            <div className="p-2 border-b border-white/10">
+              <input
+                autoFocus
+                value={q}
+                onChange={e => {
+                  setQ(e.target.value)
+                  setHover(0)
                 }}
-              >
-                ＋ {allowCreateLabel!.replace('%s', q.trim())}
-              </div>
-            )}
+                onKeyDown={e => {
+                  if (e.key === 'ArrowDown') {
+                    e.preventDefault()
+                    setHover(h => Math.min(h + 1, (options.length - 1) + (showCreate ? 1 : 0)))
+                  } else if (e.key === 'ArrowUp') {
+                    e.preventDefault()
+                    setHover(h => Math.max(h - 1, 0))
+                  } else if (e.key === 'Enter') {
+                    e.preventDefault()
+                    if (showCreate && hover === 0) {
+                      onSelect({ id: 'new', name: q.trim() } as T)
+                      setOpen(false)
+                      return
+                    }
+                    const idx = showCreate ? hover - 1 : hover
+                    const chosen = options[idx]
+                    if (chosen) {
+                      onSelect(chosen)
+                      setOpen(false)
+                    }
+                  } else if (e.key === 'Escape') {
+                    setOpen(false)
+                  }
+                }}
+                placeholder="Type to search…"
+                className="w-full bg-black/30 border border-white/10 rounded-none px-2 py-2 text-sm outline-none focus:border-white/30"
+              />
+            </div>
 
-            {options.map((o, i) => {
-              const idx = showCreate ? i + 1 : i
-              return (
+            <div className="max-h-72 overflow-auto">
+              {loading && <div className="px-3 py-2 text-sm text-white/60">Searching…</div>}
+
+              {showCreate && (
                 <div
-                  key={o.id}
-                  className={`px-3 py-2 text-sm cursor-pointer hover:bg-white/5 ${hover === idx ? 'bg-white/10' : ''}`}
-                  onMouseEnter={() => setHover(idx)}
+                  className={`px-3 py-2 text-sm cursor-pointer hover:bg-white/5 ${hover === 0 ? 'bg-white/10' : ''}`}
+                  onMouseEnter={() => setHover(0)}
                   onClick={() => {
-                    onSelect(o)
+                    onSelect({ id: 'new', name: q.trim() } as T)
                     setOpen(false)
                   }}
                 >
-                  <div
-                    className="truncate"
-                    dangerouslySetInnerHTML={{
-                      __html: highlight(o.name, q).replace(/⟨/g,'<mark class="bg-white/10 text-white/90 px-0.5">').replace(/⟩/g,'</mark>'),
-                    }}
-                  />
+                  ＋ {allowCreateLabel!.replace('%s', q.trim())}
                 </div>
-              )
-            })}
+              )}
 
-            {!loading && !showCreate && options.length === 0 && (
-              <div className="px-3 py-3 text-sm text-white/60">No results</div>
-            )}
-          </div>
-        </div>
-      )}
+              {options.map((o, i) => {
+                const idx = showCreate ? i + 1 : i
+                return (
+                  <div
+                    key={o.id}
+                    className={`px-3 py-2 text-sm cursor-pointer hover:bg-white/5 ${hover === idx ? 'bg-white/10' : ''}`}
+                    onMouseEnter={() => setHover(idx)}
+                    onClick={() => {
+                      onSelect(o)
+                      setOpen(false)
+                    }}
+                  >
+                    <div
+                      className="truncate"
+                      dangerouslySetInnerHTML={{
+                        __html: (() => {
+                          const text = o.name
+                          if (!q) return text
+                          const i = text.toLowerCase().indexOf(q.toLowerCase())
+                          if (i === -1) return text
+                          return (
+                            text.slice(0, i) +
+                            '<mark class="bg-white/10 text-white/90 px-0.5">' +
+                            text.slice(i, i + q.length) +
+                            '</mark>' +
+                            text.slice(i + q.length)
+                          )
+                        })(),
+                      }}
+                    />
+                  </div>
+                )
+              })}
+
+              {!loading && !showCreate && options.length === 0 && (
+                <div className="px-3 py-3 text-sm text-white/60">No results</div>
+              )}
+            </div>
+          </div>,
+          document.body
+        )}
     </div>
   )
 }
@@ -605,6 +673,9 @@ export default function Estimator() {
   const [error, setError] = useState<string | null>(null)
   const [aiLoading, setAiLoading] = useState(false)
 
+  // tooltip state for disabled SMS
+  const [showSmsTip, setShowSmsTip] = useState(false)
+
   // compute totals
   const totals: Totals = useMemo(() => {
     const subtotal = items.reduce(
@@ -931,54 +1002,107 @@ export default function Estimator() {
 
         <section className="col-span-12 lg:col-span-10 h-full min-h-0">
           <div className="glass rounded-none p-3 md:p-4 flex flex-col gap-3 min-h-[70vh]">
-            {/* Header / Tabs */}
-            <div className="flex items-center justify-between">
-              <div className="text-lg font-semibold">Estimator</div>
-              <div className="flex items-center gap-2">
-                <div className="bg-white/5 border border-white/10 rounded-none p-1">
-                  <button
-                    className={`px-3 py-1.5 text-sm ${tab === 'estimate' ? 'bg-white/10' : ''}`}
-                    onClick={() => setTab('estimate')}
-                  >
-                    Estimate
-                  </button>
-                  <button
-                    className={`px-3 py-1.5 text-sm ${tab === 'measure' ? 'bg-white/10' : ''}`}
-                    onClick={() => setTab('measure')}
-                  >
-                    Measure
-                  </button>
-                </div>
-                {tab === 'estimate' && (
-                  <div className="flex items-center gap-2">
+            {/* Header / Tabs (sticky actions) */}
+            <div className="-mx-3 md:-mx-4 px-3 md:px-4 py-2 sticky top-0 z-10 border-b border-white/10 bg-neutral-900/85 backdrop-blur supports-[backdrop-filter]:bg-neutral-900/60">
+              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 md:gap-3">
+                {/* Left: title + tabs */}
+                <div className="flex items-center gap-2">
+                  <div className="text-lg font-semibold">Estimator</div>
+                  <div className="hidden md:block h-5 w-px bg-white/10" />
+                  <div className="bg-white/5 border border-white/10 rounded-full p-0.5">
                     <button
-                      className="px-3 py-1.5 text-sm rounded-none glass disabled:opacity-60"
-                      onClick={handleSendSMS}
-                      disabled={sending || !canSend}
+                      className={['px-3 py-1.5 text-sm rounded-full', tab === 'estimate' ? 'bg-white/10' : 'hover:bg-white/5'].join(' ')}
+                      onClick={() => setTab('estimate')}
                     >
+                      Estimate
+                    </button>
+                    <button
+                      className={['px-3 py-1.5 text-sm rounded-full', tab === 'measure' ? 'bg-white/10' : 'hover:bg-white/5'].join(' ')}
+                      onClick={() => setTab('measure')}
+                    >
+                      Measure
+                    </button>
+                  </div>
+                </div>
+
+                {/* Right: actions (only for Estimate tab) */}
+                {tab === 'estimate' && (
+                  <div className="relative flex flex-wrap items-center gap-2 md:gap-3">
+                    <button
+                      className="inline-flex items-center gap-2 md:px-4 md:py-2 px-3 py-1.5 text-sm rounded-none bg-sky-600 hover:bg-sky-500 active:bg-sky-700 text-white border border-sky-400/30 disabled:opacity-60 disabled:cursor-not-allowed"
+                      onClick={handleSendSMS}
+                      onMouseEnter={() => !canSend && setShowSmsTip(true)}
+                      onMouseLeave={() => setShowSmsTip(false)}
+                      onFocus={() => !canSend && setShowSmsTip(true)}
+                      onBlur={() => setShowSmsTip(false)}
+                      disabled={sending || !canSend}
+                      aria-busy={sending}
+                      title={canSend ? 'Send estimate via SMS' : 'Add a valid phone and at least one item'}
+                    >
+                      {sending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
                       {sending ? 'Sending…' : 'Send via SMS'}
                     </button>
+                    <DispositionButton
+  contactId={assignedContactId || customer.name || 'unknown'}
+  onDispo={async (p: DispositionPayload) => {
+    // 1) persist disposition
+    await fetch(`${API_BASE}/api/dispositions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(p),
+    })
+    // 2) kick off AI follow-up (server can branch on p.disposition)
+    await fetch(`${API_BASE}/api/agent/followup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(p),
+    })
+  }}
+/>
+
+                    {/* Tooltip (desktop) */}
+                    {!canSend && showSmsTip && (
+                      <div
+                        role="tooltip"
+                        className="absolute top-full mt-1 left-0 text-[11px] bg-black/80 border border-white/10 px-2 py-1 rounded-none"
+                      >
+                        Add at least one item and a valid phone to enable SMS.
+                      </div>
+                    )}
+
+                    <div className="hidden md:block h-6 w-px bg-white/10" />
+
                     <button
                       type="button"
                       onClick={handleCopyEstimate}
-                      className="px-3 py-1.5 text-sm rounded-none border border-white/15 bg-white/5 hover:bg-white/10"
+                      className="inline-flex items-center gap-2 md:px-4 md:py-2 px-3 py-1.5 text-sm rounded-none border border-white/15 bg-white/5 hover:bg-white/10 disabled:opacity-60"
                       title="Copy estimate text to clipboard"
                       disabled={items.length === 0}
                     >
+                      <CopyIcon size={16} />
                       {copied ? 'Copied!' : 'Copy'}
                     </button>
+
                     <button
                       type="button"
                       onClick={async () => {
                         setShowPreview(true)
                         if (!coverLetter) await generateCoverLetter()
                       }}
-                      className="px-3 py-1.5 text-sm rounded-none border border-white/15 bg-white/5 hover:bg-white/10"
+                      className="inline-flex items-center gap-2 md:px-4 md:py-2 px-3 py-1.5 text-sm rounded-none border border-white/15 bg-white/5 hover:bg-white/10 disabled:opacity-60"
                       title="See print-ready proposal with AI cover letter"
                       disabled={items.length === 0}
                     >
+                      <Eye size={16} />
                       Preview Proposal
                     </button>
+
+                    {/* subtle helper (mobile wrap) */}
+                    {!canSend && (
+                      <div className="basis-full md:hidden text-xs text-white/55">
+                        Add at least one item and a valid phone to enable SMS.
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -1272,7 +1396,6 @@ export default function Estimator() {
                     className="w-full bg-black/30 border border-white/10 rounded-none px-2 py-2 text-sm outline-none focus:border-white/30"
                   />
                   <div className="mt-2 flex items-center gap-2">
-                    {/* Blue to match the SideNav accent */}
                     <button
                       className="px-3 py-1.5 text-sm rounded-none bg-sky-600 hover:bg-sky-500 active:bg-sky-700 text-white border border-sky-400/30 disabled:opacity-60 disabled:cursor-not-allowed"
                       onClick={handleAiAssist}

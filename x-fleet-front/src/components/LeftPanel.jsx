@@ -4,7 +4,7 @@ import AlertList from './AlertList.jsx'
 import Inbox from './Inbox.jsx'
 import Vehicles from './VehiclesPanel.jsx'
 import WeekPlanner from './WeekPlanner.jsx'
-import ContactsPanel from './ContactsPanel'
+import ContactsPanel from './ContactsPanel.tsx'
 import JobListByDay from './JobListByDay'
 import { API_BASE } from '../config'
 

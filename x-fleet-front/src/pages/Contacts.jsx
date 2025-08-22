@@ -4,20 +4,19 @@ import { useNavigate } from 'react-router-dom'
 import TopBar from '../components/TopBar.jsx'
 import SideNav from '../components/SideNav.jsx'
 import StatBar from '../components/StatBar.jsx'
-import ContactsPanel from '../components/ContactsPanel.jsx'
+import ContactsPanel from '../components/ContactsPanel'
 import { Plus } from 'lucide-react'
 
 export default function ContactsPage() {
   const navigate = useNavigate()
   const [compact, setCompact] = useState(false)
 
-  // page-level filters/controls (plain JS strings)
+  // page-level filters/controls
   const [segment, setSegment] = useState('all') // 'all' | 'customers' | 'leads'
   const [query, setQuery] = useState('')
-  const [sortBy, setSortBy] = useState('recent') // 'recent' | 'name'
+  const [sortBy] = useState('recent') // default behavior; no UI control
 
   const topSearchRef = useRef(null)
-  const subSearchRef = useRef(null)
   const fileRef = useRef(null)
 
   // Press "/" to focus search (unless typing in an input/textarea)
@@ -27,7 +26,7 @@ export default function ContactsPage() {
       const tag = (document.activeElement?.tagName || '').toLowerCase()
       if (tag === 'input' || tag === 'textarea') return
       e.preventDefault()
-      ;(topSearchRef.current || subSearchRef.current)?.focus()
+      topSearchRef.current?.focus()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -79,8 +78,10 @@ export default function ContactsPage() {
                   />
                   <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-xs text-white/40">/</span>
                 </div>
+
+                {/* Make Import subtle so New Contact is the hero */}
                 <button
-                  className="px-3 py-1.5 text-sm rounded-none border border-white/15 bg-white/5 hover:bg-white/10"
+                  className="px-3 py-1.5 text-sm rounded-none border border-white/10 bg-transparent hover:bg-white/5"
                   onClick={() => fileRef.current?.click()}
                 >
                   Import CSV
@@ -92,6 +93,7 @@ export default function ContactsPage() {
                   className="hidden"
                   onChange={(e) => importCsv(e.target.files?.[0] || null)}
                 />
+
                 <button
                   className="px-3 py-1.5 text-sm rounded-none bg-sky-600 hover:bg-sky-500 active:bg-sky-700 text-white border border-sky-400/30 inline-flex items-center gap-2"
                   onClick={openNewContact}
@@ -101,50 +103,27 @@ export default function ContactsPage() {
               </div>
             </div>
 
-            {/* Sub-toolbar */}
-            <div className="flex flex-wrap items-center justify-between gap-2 border border-white/10 rounded-xl bg-white/[0.035] p-2">
-              <div className="flex items-center gap-2">
-                <div className="inline-flex rounded-md overflow-hidden border border-white/10">
-                  {['all', 'customers', 'leads'].map((x) => (
-                    <button
-                      key={x}
-                      className={'px-3 py-1.5 text-sm ' + (segment === x ? 'bg-white/10' : 'hover:bg-white/5')}
-                      onClick={() => setSegment(x)}
-                    >
-                      {x === 'all' ? 'All' : x[0].toUpperCase() + x.slice(1)}
-                    </button>
-                  ))}
-                </div>
-
-                <input
-                  ref={subSearchRef}
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search by name, phone, email, address…"
-                  className="w-[min(52ch,70vw)] bg-black/30 border border-white/10 rounded-none px-2 py-2 text-sm outline-none focus:border-white/30"
-                />
-
-                <div className="relative">
-                  <select
-                    value={sortBy}
-                    onChange={(e) => setSortBy(e.target.value)}
-                    className="appearance-none bg-black/30 border border-white/10 rounded-none px-2 py-2 text-sm pr-7"
-                    title="Sort contacts"
+            {/* Filters as tabs (no extra box/border) */}
+            <nav className="flex items-center gap-1">
+              {['all', 'customers', 'leads'].map((x) => {
+                const active = segment === x
+                return (
+                  <button
+                    key={x}
+                    onClick={() => setSegment(x)}
+                    aria-current={active ? 'page' : undefined}
+                    className={[
+                      'px-3 py-1.5 text-sm rounded-full border',
+                      active
+                        ? 'border-sky-400/40 bg-sky-500/20 text-white'
+                        : 'border-white/10 text-white/70 hover:bg-white/5',
+                    ].join(' ')}
                   >
-                    <option value="recent">Sort: Recent first</option>
-                    <option value="name">Sort: A → Z</option>
-                  </select>
-                  <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-white/50">▾</span>
-                </div>
-              </div>
-
-              <button
-                className="px-3 py-1.5 text-sm rounded-none border border-white/15 bg-white/5 hover:bg-white/10 inline-flex items-center gap-2"
-                onClick={openNewContact}
-              >
-                <Plus size={16} /> New Contact
-              </button>
-            </div>
+                    {x === 'all' ? 'All' : x[0].toUpperCase() + x.slice(1)}
+                  </button>
+                )
+              })}
+            </nav>
 
             {/* List / details */}
             <ContactsPanel
@@ -152,6 +131,7 @@ export default function ContactsPage() {
               query={query}
               sortBy={sortBy}
               segment={segment}
+              onCreateContact={openNewContact}
             />
           </div>
         </section>
