@@ -1,11 +1,13 @@
-import { CalendarDays, Users, AlertTriangle, MessageSquare, Truck, Calendar as CalendarIcon, Package, Link as LinkIcon, Calculator } from 'lucide-react'
+import { CalendarDays, Users, AlertTriangle, MessageSquare, Truck, Calendar as CalendarIcon, Package, Link as LinkIcon, Calculator, History, Clock } from 'lucide-react'
+
 import { NavLink, useLocation } from 'react-router-dom'
 import { Map as MapIcon } from 'lucide-react'
 
 const NAV = [
   { id: 'planner',   label: 'Jobs',           Icon: CalendarDays,  to: '/' },
   { id: 'contacts',  label: 'Contacts',       Icon: Users,         to: '/contacts' },
-  // You mentioned AI Alerts shouldn't be in the sidenav; leaving it out by default.
+  { id: 'activity',  label: 'Activity',       Icon: History,       to: '/events' },
+  { id: 'automations', label: 'Automations',  Icon: Clock,         to: '/automations' },
   { id: 'chatter',   label: 'Chatter',        Icon: MessageSquare, to: '/chatter' },
   { id: 'estimator', label: 'Estimator',      Icon: Calculator,    to: '/estimator' }, // ← added
   { id: 'vehicles',  label: 'Vehicles',       Icon: Truck,         to: '/vehicles' },

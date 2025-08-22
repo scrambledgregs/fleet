@@ -28,110 +28,9 @@ const PRICE = {
   laborPerHour: 75,
 }
 
-/** Lightweight address autocomplete for Nominatim */
-function AutocompleteAddress({
-  value,
-  onChange,
-  onPick,
-  placeholder = 'Search by address…',
-}: {
-  value: string
-  onChange: (v: string) => void
-  onPick: (opt: { label: string; lat: number; lon: number }) => void
-  placeholder?: string
-}) {
-  const [open, setOpen] = useState(false)
-  const [loading, setLoading] = useState(false)
-  const [options, setOptions] = useState<any[]>([])
-  const cacheRef = useRef<Record<string, any[]>>({})
-  const timerRef = useRef<number | null>(null)
-  const boxRef = useRef<HTMLDivElement | null>(null)
-
-  // Close on outside click
-  useEffect(() => {
-    function onDoc(e: MouseEvent) {
-      if (!boxRef.current) return
-      if (!boxRef.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', onDoc)
-    return () => document.removeEventListener('mousedown', onDoc)
-  }, [])
-
-  // Debounced fetch
-  useEffect(() => {
-    if (!value.trim()) {
-      setOptions([])
-      setOpen(false)
-      return
-    }
-    if (timerRef.current) window.clearTimeout(timerRef.current)
-    timerRef.current = window.setTimeout(async () => {
-      const q = value.trim()
-      if (cacheRef.current[q]) {
-        setOptions(cacheRef.current[q])
-        setOpen(true)
-        return
-      }
-      setLoading(true)
-      try {
-        const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&addressdetails=1&q=${encodeURIComponent(
-          q
-        )}`
-        // In browsers, Referer is sent automatically; UA cannot be set.
-        const r = await fetch(url, { headers: { Accept: 'application/json' } })
-        const j = await r.json().catch(() => [])
-        const opts = Array.isArray(j) ? j : []
-        cacheRef.current[q] = opts
-        setOptions(opts)
-        setOpen(true)
-      } finally {
-        setLoading(false)
-      }
-    }, 300) as unknown as number
-    return () => {
-      if (timerRef.current) window.clearTimeout(timerRef.current)
-    }
-  }, [value])
-
-  return (
-    <div className="relative" ref={boxRef}>
-      <input
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        onFocus={() => {
-          if (options.length) setOpen(true)
-        }}
-        placeholder={placeholder}
-        className="w-full bg-black/30 border border-white/10 rounded-none px-2 py-2 text-sm"
-      />
-      {open && (loading || options.length > 0) && (
-        <div className="absolute z-30 mt-1 w-full max-h-56 overflow-auto bg-neutral-900 border border-white/10 rounded-none shadow">
-          {loading && <div className="px-3 py-2 text-xs opacity-70">Searching…</div>}
-          {!loading &&
-            options.map((o) => {
-              const label = o.display_name as string
-              return (
-                <button
-                  key={o.place_id}
-                  type="button"
-                  className="block w-full text-left px-3 py-2 text-sm hover:bg-white/10"
-                  onClick={() => {
-                    setOpen(false)
-                    onPick({ label, lat: Number(o.lat), lon: Number(o.lon) })
-                  }}
-                >
-                  {label}
-                </button>
-              )
-            })}
-          {!loading && options.length === 0 && (
-            <div className="px-3 py-2 text-xs opacity-70">No matches</div>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
+// Reusable primary button classes (match brand blue used elsewhere)
+const BTN_PRIMARY =
+  'px-3 py-1.5 text-sm rounded-none bg-sky-600 hover:bg-sky-500 active:bg-sky-700 text-white border border-sky-400/30 disabled:opacity-60 disabled:cursor-not-allowed'
 
 export default function RoofMeasure() {
   const navigate = useNavigate()
@@ -142,6 +41,7 @@ export default function RoofMeasure() {
   const [mode, setMode] = useState<'Approve' | 'Schedule' | 'Dispatch'>('Approve')
   const [compact, setCompact] = useState(false)
   const [addr, setAddr] = useState('')
+  const [searching, setSearching] = useState(false)
   const [pitch, setPitch] = useState('6/12')
   const [measure, setMeasure] = useState<Measure>({
     planSqft: 0,
@@ -189,9 +89,12 @@ export default function RoofMeasure() {
     const planM2 = turf.area(gj)
     const planSqft = planM2 * 10.7639
 
-    // perimeter (outer ring -> LineString)
+    // perimeter (outer ring -> LineString). Ensure closed ring for robust length.
     const outer: Position[] = (gj.geometry?.coordinates?.[0] ?? []) as Position[]
-    const perimMeters = turf.length(turf.lineString(outer), { units: 'meters' })
+    const closed = outer.length && (outer[0][0] !== outer[outer.length - 1][0] || outer[0][1] !== outer[outer.length - 1][1])
+      ? [...outer, outer[0]]
+      : outer
+    const perimMeters = turf.length(turf.lineString(closed), { units: 'meters' })
     const perimeterFt = perimMeters * 3.28084
 
     const pitchFactor = PITCH_FACTORS[pitch] ?? 1.118
@@ -240,6 +143,10 @@ export default function RoofMeasure() {
     const onCreated = (e: any) => {
       fg.clearLayers()
       fg.addLayer(e.layer)
+      try {
+        const b = (e.layer as L.Polygon).getBounds?.()
+        if (b) mapObj.fitBounds(b, { padding: [16, 16] })
+      } catch {}
       recompute()
     }
     const onEdited = (_e: any) => recompute()
@@ -271,17 +178,33 @@ export default function RoofMeasure() {
   }, [recompute])
 
   async function lookup() {
-    if (!addr.trim()) return
-    const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&addressdetails=1&q=${encodeURIComponent(
-      addr
-    )}`
-    const r = await fetch(url, { headers: { Accept: 'application/json' } })
-    const j = await r.json().catch(() => [])
-    if (Array.isArray(j) && j[0]) {
-      const { lat, lon } = j[0]
-      const m = mapInstRef.current
-      if (m) m.setView([Number(lat), Number(lon)], 19)
+    if (!addr.trim() || searching) return
+    setSearching(true)
+    try {
+      const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(addr)}`
+      const r = await fetch(url, {
+        headers: {
+          Accept: 'application/json',
+          // Nominatim recommends a descriptive UA/email
+          'User-Agent': 'NonstopJobs/1.0 (roof-measure)'
+        },
+      })
+      const j = await r.json().catch(() => [])
+      if (Array.isArray(j) && j[0]) {
+        const { lat, lon } = j[0]
+        const m = mapInstRef.current
+        if (m) m.setView([Number(lat), Number(lon)], 19)
+      }
+    } finally {
+      setSearching(false)
     }
+  }
+
+  function clearDrawing() {
+    const fg = featureGroupRef.current
+    if (!fg) return
+    fg.clearLayers()
+    setMeasure((m) => ({ ...m, planSqft: 0, roofSqft: 0, squares: 0, perimeterFt: 0 }))
   }
 
   const summary = useMemo(() => {
@@ -333,11 +256,7 @@ export default function RoofMeasure() {
   }
 
   return (
-    <div className={'min-h-screen flex flex-col text-white ' + (compact ? 'compact-root' : '')}>
-      <TopBar mode={mode} setMode={setMode} compact={compact} setCompact={setCompact} />
-      <div className={'px-6 ' + (compact ? 'pt-2' : 'pt-4')}>
-        <StatBar />
-      </div>
+    <div className="glass rounded-none p-4">
 
       <main
         className={
@@ -367,8 +286,9 @@ export default function RoofMeasure() {
                 </select>
                 <button
                   onClick={sendToEstimator}
-                  className="px-3 py-1.5 text-sm rounded-none glass"
+                  className={BTN_PRIMARY}
                   disabled={measure.squares <= 0}
+                  title={measure.squares <= 0 ? 'Draw a polygon to enable' : 'Send items to Estimator'}
                 >
                   Use in Estimator
                 </button>
@@ -378,20 +298,27 @@ export default function RoofMeasure() {
             <div className="grid grid-cols-12 gap-3 min-h-[60vh]">
               <div className="col-span-12 lg:col-span-9">
                 <div className="flex gap-2 mb-2">
-                  <div className="flex-1">
-                    <AutocompleteAddress
-                      value={addr}
-                      onChange={setAddr}
-                      onPick={({ label, lat, lon }) => {
-                        setAddr(label)
-                        const m = mapInstRef.current
-                        if (m) m.setView([lat, lon], 19)
-                      }}
-                      placeholder="Search by address…"
-                    />
-                  </div>
-                  <button onClick={lookup} className="px-3 py-2 rounded-none glass text-sm" disabled={!addr.trim()}>
-                    Find
+                  <input
+                    value={addr}
+                    onChange={(e) => setAddr(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') lookup() }}
+                    placeholder="Search address…"
+                    className="flex-1 bg-black/30 border border-white/10 rounded-none px-2 py-2 text-sm"
+                  />
+                  <button
+                    onClick={lookup}
+                    className={BTN_PRIMARY}
+                    disabled={searching || !addr.trim()}
+                    title={!addr.trim() ? 'Enter an address' : 'Search'}
+                  >
+                    {searching ? 'Finding…' : 'Find'}
+                  </button>
+                  <button
+                    onClick={clearDrawing}
+                    className="px-3 py-1.5 text-sm rounded-none border border-white/15 bg-white/5 hover:bg-white/10 disabled:opacity-60"
+                    title="Clear drawing"
+                  >
+                    Clear
                   </button>
                 </div>
                 <div ref={mapRef} className="w-full h-[60vh] rounded-none border border-white/10" />

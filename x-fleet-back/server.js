@@ -27,6 +27,8 @@ import { SuggestTimesRequestSchema, CreateAppointmentReqSchema, UpsertTechsReque
 import { generateEstimateItems, draftEstimateCopy } from './lib/estimate-llm.ts'
 import { aiEstimate } from "./lib/estimate.ts";
 import contactsRouter from './routes/contacts.ts';
+import { createEvent, recordAndEmit, listEvents } from './lib/events.ts';
+import { registerAutomationRoutes, dispatchEvent } from './lib/automations.ts';
 import rateLimit from 'express-rate-limit';
 
 function ttlMap(ttlMs, opts = {}) {
@@ -212,6 +214,9 @@ app.use('/api', emailSendRoute);
 // 👉 Mount the DB-backed contacts router here
 app.use('/api/contacts-db', contactsRouter);
 
+// automations router
+app.use('/api', registerAutomationRoutes());
+
 app.post('/api/test-email', async (req, res) => {
   try {
     const { to, subject = 'Mailgun prototype test', text, html, replyTo, domain, from } = req.body || {};
@@ -316,6 +321,14 @@ app.post(
     }
   }
 );
+
+// Events 
+ app.get('/api/events', (req, res) => {
+   const clientId = (req.query.clientId || 'default').trim();
+   const limit = Number(req.query.limit) || 100;
+   const events = listEvents({ clientId, limit });
+   res.json({ ok: true, events });
+ });
 
 // ---- VEHICLES CRUD ----
 app.get('/api/vehicles', (req, res) => {
@@ -613,6 +626,27 @@ app.post('/api/jobs', async (req, res) => {
 
     jobs.set(job.appointmentId, job);
 
+// 🔔 audit: appointment created (API -> "web")
+recordAndEmit(
+  io,
+  createEvent(
+    'appointment.created',
+    clientId,
+    {
+      appointmentId: job.appointmentId,
+      contactId: (contact && contact.id) || (job.contact && job.contact.id) || null,
+      contactName: (contact && contact.name) || (job.contact && job.contact.name) || null,
+      address,
+      startTime: job.startTime,
+      endTime: job.endTime,
+      estValue: job.estValue,
+      territory: job.territory,
+      createdBy: 'web', // who/what created this
+    },
+    { source: 'web', idempotencyKey: `${job.appointmentId}:created` }
+  )
+);
+
     // live-refresh UIs
     io.emit('job:created', { clientId, job });
 
@@ -622,6 +656,8 @@ app.post('/api/jobs', async (req, res) => {
     res.status(500).json({ ok:false, error: 'failed to create job' });
   }
 });
+
+
 
 // --- Jobs: list (debug/convenience) ---
 app.get('/api/jobs', (req, res) => {
@@ -887,8 +923,7 @@ app.get('/api/contacts/:id/dispositions', (req, res) => {
   res.json({ ok:true, contactId:id, dispositions: list });
 });
 
-// POST /api/contacts/:id/dispositions  → { key, label, note?, clientId? }
-app.post('/api/contacts/:id/dispositions', (req, res) => {
+app.post('/api/contacts/:id/dispositions', async (req, res) => {
   try {
     const clientId = (req.body.clientId || req.query.clientId || 'default').trim();
     const id = req.params.id;
@@ -907,7 +942,6 @@ app.post('/api/contacts/:id/dispositions', (req, res) => {
     // If missing, auto-seed a minimal summary from jobs for this contact
     if (!row) {
       const jobsMap = jobsByClient.get(clientId) || new Map();
-      // find the newest job for this contact to grab some context
       const jobs = Array.from(jobsMap.values())
         .filter(j => (j?.contact?.id || j?.contactId) === id)
         .sort((a,b) => new Date(b.startTime) - new Date(a.startTime));
@@ -934,7 +968,6 @@ app.post('/api/contacts/:id/dispositions', (req, res) => {
     }
 
     if (!row) {
-      // Still nothing to seed from—fail clearly
       return res.status(404).json({ ok:false, error:'contact not found (seed first via /api/contacts or create a job with this contact)' });
     }
 
@@ -950,8 +983,27 @@ app.post('/api/contacts/:id/dispositions', (req, res) => {
 
     row.dispositions.push(entry);
     row.lastDisposition = entry;
-
     bag.set(id, row);
+
+    // 🔔 record + broadcast the domain event (AFTER entry exists)
+    const ev = createEvent(
+      'contact.disposition.created',
+      clientId,
+      {
+        contactId: id,
+        key: entry.key,
+        label: entry.label,
+        note: entry.note ?? null,
+        at: entry.at,
+      },
+      {
+        source: 'api',
+        idempotencyKey: `${id}:${entry.at}:${entry.key}`,
+      }
+    );
+    recordAndEmit(io, ev);
+    await dispatchEvent(ev);
+
     return res.status(201).json({ ok:true, entry });
   } catch (e) {
     console.error('[contacts disposition]', e);
