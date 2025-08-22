@@ -1,3 +1,29 @@
+@import "leaflet/dist/leaflet.css";
+@import "leaflet-draw/dist/leaflet.draw.css";
+
+/* …your existing tailwind lines after this … */
+
 @tailwind base; @tailwind components; @tailwind utilities;
 :root{ color-scheme:dark } html, body, #root{ height:100%; background:#0f1115 }
 .glass{ @apply bg-panel/90 backdrop-blur border border-white/5 shadow-soft }
+
+/* ---- Dense shell spacing (tighten grid gutters globally) ---- */
+/* This trims the large gap/padding from pages that use <main class="grid ... gap-6 p-6"> */
+main.grid {
+  gap: 0.75rem !important;       /* was gap-6 (1.5rem) → now ~gap-3 (0.75rem) */
+  padding: 0.75rem !important;   /* was p-6 (1.5rem)  → now ~p-3 (0.75rem) */
+}
+
+/* Most pages have nested grids inside <main>. Trim those too. */
+main .grid {
+  gap: 0.75rem !important;
+}
+
+/* Make sure columns can scroll inside their panes instead of growing the page */
+main.grid > * { min-height: 0; }
+
+/* No gutter between the SideNav (<aside>) and the page content (<section>) */
+main.grid.grid-cols-12 {
+  column-gap: 0 !important;   /* was gap-? → now flush */
+}
+

@@ -19,7 +19,13 @@ import {
   createAppointmentV2,
 } from './lib/ghl.js';
 import createChatterRouter from './routes/chatter.js';
+import mailgunRoute from './routes/mailgun.ts';  // ← NEW (TS file, tsconfig has allowJs so mixed is fine)
+import { sendEmail } from './lib/mailgun.ts';
+import { draftEmail } from './lib/emailDraft.ts';
+import emailSendRoute from './routes/emailSend.ts';
 import { SuggestTimesRequestSchema, CreateAppointmentReqSchema, UpsertTechsRequestSchema } from './lib/schemas.js';
+import { generateEstimateItems, draftEstimateCopy } from './lib/estimate-llm.ts'
+import { aiEstimate } from "./lib/estimate.ts";
 
 const geocodeCache = new Map();
 const app = express()
@@ -136,7 +142,116 @@ app.use((req, _res, next) => {
   next()
 })
 
+//EMAIL -- mailgun
+
 app.use(createChatterRouter(io));
+app.use('/api', mailgunRoute); 
+app.use('/api', emailSendRoute);
+
+app.post('/api/test-email', async (req, res) => {
+  try {
+    const { to, subject = 'Mailgun prototype test', text, html, replyTo, domain, from } = req.body || {};
+    if (!to) return res.status(400).json({ ok:false, error:'to required' });
+    const r = await sendEmail({
+      to, subject,
+      text: text || 'Hello from Fleet via Mailgun.',
+      html: html || '<p>Hello from <b>Fleet</b> via Mailgun.</p>',
+      replyTo: replyTo || 'greg@nonstopautomation.com',
+      domain, // ← optional override
+      from,   // ← optional override
+    });
+    res.json({ ok:true, result: r });
+  } catch (e) {
+    res.status(500).json({ ok:false, error: e.message || String(e) });
+  }
+});
+
+app.post('/api/email/draft', async (req, res) => {
+  try {
+    const { context, tone = 'friendly' } = req.body || {};
+    if (!context) return res.status(400).json({ ok:false, error:'context required' });
+    const draft = await draftEmail(context, tone);
+    res.json({ ok:true, draft });
+  } catch (e) {
+    res.status(500).json({ ok:false, error: e.message || 'draft failed' });
+  }
+});
+
+
+// POST /api/email/draft-and-send
+// body: { to, context, tone?, replyTo? }
+app.post('/api/email/draft-and-send', async (req, res) => {
+  try {
+    const { to, context, tone = 'friendly', replyTo } = req.body || {};
+    if (!to || !context) return res.status(400).json({ ok:false, error:'to and context required' });
+
+    const draft = await draftEmail(context, tone);
+    const result = await sendEmail({
+      to,
+      subject: draft.subject,
+      html: draft.html,
+      replyTo
+    });
+
+    // result.id is Mailgun’s message id; you can store it to correlate webhooks
+    res.json({ ok:true, draft, send: result });
+  } catch (e) {
+    res.status(500).json({ ok:false, error: e.message || 'draft-and-send failed' });
+  }
+});
+
+// --- Estimate AI: generate structured line items from a free-text prompt ---
+app.post('/api/estimate/ai/items', async (req, res) => {
+  try {
+    const { prompt } = req.body || {}
+    if (!prompt || typeof prompt !== 'string') {
+      return res.status(400).json({ ok: false, error: 'prompt (string) is required' })
+    }
+    const payload = await generateEstimateItems(prompt)
+    return res.json({ ok: true, ...payload }) // => { ok, items, notes }
+  } catch (e) {
+    console.warn('[estimate.ai.items]', e?.message || e)
+    return res.status(500).json({ ok: false, error: 'llm_failed' })
+  }
+})
+
+// --- Estimate AI: draft short SMS/email text for the estimate ---
+app.post('/api/estimate/ai/summary', async (req, res) => {
+  try {
+    const { items = [], notes = '', contact = {} } = req.body || {}
+    const text = await draftEstimateCopy({ items, notes }, contact)
+    return res.json({ ok: true, text })
+  } catch (e) {
+    console.warn('[estimate.ai.summary]', e?.message || e)
+    return res.status(500).json({ ok: false, error: 'llm_failed' })
+  }
+})
+
+app.post(
+  '/api/agent/estimate',
+  express.json(),
+  async (req, res) => {
+    try {
+      const prompt = String(req.body?.prompt || '').trim();
+      if (!prompt) return res.status(400).json({ ok: false, error: 'prompt required' });
+
+      // NEW: accept up to 5 image URLs (job photos / satellite tiles)
+      const images = Array.isArray(req.body?.images)
+        ? req.body.images.filter((u) => typeof u === 'string' && u.trim()).slice(0, 5)
+        : [];
+
+      const out = await aiEstimate(prompt, images);
+
+      if (out.items?.length) {
+        return res.json({ ok: true, items: out.items, notes: out.notes ?? null });
+      }
+      return res.json({ ok: true, items: [], text: out.raw || '' });
+    } catch (e) {
+      console.error('[/api/agent/estimate]', e?.message || e);
+      res.status(500).json({ ok: false, error: 'estimate failed' });
+    }
+  }
+);
 
 // ---- VEHICLES CRUD ----
 app.get('/api/vehicles', (req, res) => {
@@ -320,6 +435,50 @@ app.get('/api/test-geocode', async (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 })
+
+// --- OSM / Nominatim geocode proxy with cache ---
+const nominatimCache = new Map();
+const NOM_TTL_MS = 12 * 60 * 60 * 1000; // 12h cache
+
+app.get('/api/geo/search', async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    if (!q) return res.json([]);
+
+    const key = q.toLowerCase();
+    const hit = nominatimCache.get(key);
+    if (hit && Date.now() - hit.ts < NOM_TTL_MS) {
+      return res.json(hit.data);
+    }
+
+    const email = process.env.GEOCODE_EMAIL || 'admin@example.com';
+    const url =
+      'https://nominatim.openstreetmap.org/search?format=json&limit=5&addressdetails=1&q=' +
+      encodeURIComponent(q) +
+      '&email=' + encodeURIComponent(email);
+
+    const r = await fetch(url, {
+      headers: {
+        'User-Agent': `x-fleet/1.0 (${email})`,
+        'Accept': 'application/json',
+      },
+    });
+
+    if (!r.ok) {
+      // Surface rate limit/info but don’t crash the UI
+      const msg = await r.text().catch(() => '');
+      return res.status(502).json({ ok: false, error: `nominatim_${r.status}`, details: msg.slice(0, 200) });
+    }
+
+    const data = await r.json().catch(() => []);
+    const list = Array.isArray(data) ? data : [];
+    nominatimCache.set(key, { ts: Date.now(), data: list });
+    return res.json(list);
+  } catch (e) {
+    console.warn('[geo/search]', e?.message || e);
+    return res.json([]); // fail-soft for the UI
+  }
+});
 
 app.get('/health', (req,res)=> res.json({ ok:true }))
 
@@ -1008,6 +1167,30 @@ if (SUGGEST_SLOTS_SOURCE === 'local') {
   }
 });
 
+  // real SMS
+  
+app.post('/api/sms/send', async (req, res) => {
+  try {
+    const { to, text } = req.body || {};
+    if (!to || !text) return res.status(400).json({ ok:false, error:'to and text required' });
+
+    const resp = await sendSMS(to, text);
+    recordSms({ to, from: process.env.TWILIO_FROM || process.env.TWILIO_PHONE_NUMBER, direction:'outbound', text });
+    io.emit('sms:outbound', { sid: resp.sid, to, text, at: new Date().toISOString() });
+
+    res.json({ ok:true, sid: resp.sid, status: resp.status });
+  } catch (e) {
+    res.status(500).json({
+      ok:false,
+      error: e.message || 'send failed',
+      code: e.code || null,
+      status: e.status || null,
+      moreInfo: e.moreInfo || null
+    });
+  }
+});
+
+// REPLACE the existing /api/mock/ghl/send-message block with this
 app.post('/api/mock/ghl/send-message', async (req, res) => {
   const {
     contactId,
@@ -1015,25 +1198,28 @@ app.post('/api/mock/ghl/send-message', async (req, res) => {
     direction = 'outbound',
     channel = 'sms',
     autopilot,
-    to, // optional phone number for manual threads
+    to,               // optional explicit phone for manual threads
+    clientId = 'default',
   } = req.body || {};
+
   if (!contactId) return res.status(400).json({ ok:false, error:'contactId required' });
 
-  // when persisting an explicit flag
-if (typeof autopilot === 'boolean') {
-  setAutoPref({ id: contactId, phone: phoneE164(to), enabled: autopilot });
-}
 
-// (we’ll read the preference inside the IIFE right before deciding)
-  
-let convoId = mockByContact.get(contactId);
+  // Persist per-contact AI pref if provided
+  if (typeof autopilot === 'boolean') {
+    setAutoPref({ id: contactId, phone: phoneE164(to), enabled: autopilot });
+  }
+
+  // Ensure a mock conversation (keeps UI history consistent)
+  let convoId = mockByContact.get(contactId);
   if (!convoId) {
     convoId = uuid();
     mockByContact.set(contactId, convoId);
     mockConvos.set(convoId, { id: convoId, contactId, messages: [] });
   }
-
   const convo = mockConvos.get(convoId);
+
+  // Append the outbound message to the local store
   const msg = {
     id: uuid(),
     direction,
@@ -1043,64 +1229,45 @@ let convoId = mockByContact.get(contactId);
   };
   convo.messages.push(msg);
 
-  io.emit('sms:outbound', { sid: msg.id, contactId, text: msg.text, at: msg.createdAt });
+  // ---- NEW: actually send via Twilio when this is an SMS ----
+  let emittedSid = msg.id;
+  try {
+    if (channel === 'sms' && direction === 'outbound') {
+      // Find a destination: explicit "to" or the contact’s primary phone from in-memory jobs
+      let dest = phoneE164(to);
+      if (!dest) {
+        // search all clients' jobs for this contact’s phone
+        for (const jobs of jobsByClient.values()) {
+          for (const j of jobs.values()) {
+            const c = normalizeContact(j.contact || {});
+            if (String(c.id) === String(contactId)) {
+              const p = pickPrimaryPhone(c);
+              if (p) { dest = phoneE164(p); break; }
+            }
+          }
+          if (dest) break;
+        }
+      }
 
- // --- decide if AI should reply, and (optionally) pass job context ---
-  (async () => {
-    if (direction !== 'outbound') return;
-
-    const clientIdForJob = (req.body.clientId || 'default').trim();
-    const appointmentId  = req.body.appointmentId || null;
-
-    // Read per-contact pref (or global). If this message is from a Job drawer,
-    // force AI OFF so it never tries to (re)book inside the job thread.
-    const pref      = getAutoPref({ id: contactId, phone: phoneE164(to) });
-    const aiDefault = (typeof autopilot === 'boolean') ? autopilot : (pref == null ? CHATTER_AI : pref);
-    const useAI     = appointmentId ? false : aiDefault;
-
-    // Optional job context (minimal)
-    let jobContext = null;
-    if (appointmentId) {
-      const jobs = jobsByClient.get(clientIdForJob) || new Map();
-      const j = jobs.get(appointmentId);
-      if (j) jobContext = { appointmentId: j.appointmentId };
+      if (dest) {
+        const resp = await sendSMS(dest, text);         // <-- real Twilio send
+        emittedSid = resp?.sid || emittedSid;
+      } else {
+        console.warn('[sms send] No destination phone found for contact', contactId);
+      }
     }
+  } catch (e) {
+    console.error('[sms send] Twilio error:', e?.message || e);
+    // fall through; we still keep mock history & UI event
+  }
 
-    if (!useAI) return;
+  // Notify UIs of the outbound message (use Twilio SID when available)
+  io.emit('sms:outbound', { sid: emittedSid, contactId, text: msg.text, at: msg.createdAt });
 
-    try {
-      await agentHandle({
-        from: `contact:${contactId}`,
-        to: 'chatter',
-        text,
-        context: jobContext ? { job: jobContext, contactId } : { contactId },
-        send: async (_to, replyText) => {
-          const reply = {
-            id: uuid(),
-            direction: 'inbound',
-            channel,
-            text: replyText,
-            createdAt: new Date().toISOString(),
-          };
-          const c = mockConvos.get(convoId);
-          if (c) c.messages.push(reply);
-          io.emit('sms:inbound', {
-            sid: reply.id,
-            contactId,
-            text: reply.text,
-            at: reply.createdAt,
-          });
-          return { sid: reply.id };
-        },
-      });
-    } catch (e) {
-      console.warn('[agentHandle mock]', e?.message || e);
-    }
-  })();
 
-  // ✅ send immediate response for the POST
+
   return res.json({ ok: true, conversationId: convoId, message: msg });
-}); // <-- closes /api/mock/ghl/send-message
+});
 
 app.get('/api/mock/ghl/contact/:contactId/conversations', (req, res) => {
   const contactId = req.params.contactId;

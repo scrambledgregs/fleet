@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "esModuleInterop": true,
+    "allowJs": true,
+    "checkJs": false,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    "strict": false,
+    "baseUrl": "."
+  },
+  "include": [
+    "x-fleet-back/**/*.ts",
+    "x-fleet-back/**/*.js"
+  ],
+  "exclude": [
+    "node_modules",
+    "x-fleet-front",
+    "**/dist",
+    "**/build"
+  ]
+}

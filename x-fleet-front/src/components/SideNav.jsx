@@ -1,22 +1,24 @@
-import { CalendarDays, Users, AlertTriangle, MessageSquare, Truck, Calendar as CalendarIcon, Package, Link as LinkIcon } from 'lucide-react'
+import { CalendarDays, Users, AlertTriangle, MessageSquare, Truck, Calendar as CalendarIcon, Package, Link as LinkIcon, Calculator } from 'lucide-react'
 import { NavLink, useLocation } from 'react-router-dom'
+import { Map as MapIcon } from 'lucide-react'
 
 const NAV = [
-  { id: 'planner',   label: 'Jobs',          Icon: CalendarDays,  to: '/' },
-  { id: 'contacts',  label: 'Contacts',      Icon: Users,         to: '/contacts' },
+  { id: 'planner',   label: 'Jobs',           Icon: CalendarDays,  to: '/' },
+  { id: 'contacts',  label: 'Contacts',       Icon: Users,         to: '/contacts' },
   // You mentioned AI Alerts shouldn't be in the sidenav; leaving it out by default.
-  { id: 'chatter',   label: 'Chatter',       Icon: MessageSquare, to: '/chatter' },
-  { id: 'vehicles',  label: 'Vehicles',      Icon: Truck,         to: '/vehicles' },
-  { id: 'calendar',  label: 'Calendar',      Icon: CalendarIcon,  to: '/calendar' },
-  { id: 'packs',     label: 'Industry Packs',Icon: Package,       to: '/packs' },
-  { id: 'affiliate', label: 'Affiliate',     Icon: LinkIcon,      to: '/affiliate' },
+  { id: 'chatter',   label: 'Chatter',        Icon: MessageSquare, to: '/chatter' },
+  { id: 'estimator', label: 'Estimator',      Icon: Calculator,    to: '/estimator' }, // ← added
+  { id: 'vehicles',  label: 'Vehicles',       Icon: Truck,         to: '/vehicles' },
+  { id: 'calendar',  label: 'Calendar',       Icon: CalendarIcon,  to: '/calendar' },
+  { id: 'packs',     label: 'Industry Packs', Icon: Package,       to: '/packs' },
+   { id: 'affiliate', label: 'Affiliate',      Icon: LinkIcon,      to: '/affiliate' },
 ]
 
 export default function SideNav({ active, tab = 'planner', onChange }) {
   const location = useLocation()
 
   return (
-    <nav className="relative z-10 shrink-0 w-14 sm:w-48 border-r border-white/10 pr-1 sm:pr-2 mr-2 sm:mr-3">
+    <nav className="relative z-10 shrink-0 w-14 sm:w-48 border-r border-white/10 pr-1 sm:pr-2 mr-0">
       <div className="py-1 sm:py-2 flex sm:block gap-1 sm:gap-2">
         {NAV.map(({ id, label, Icon, to }) => {
           const isActive = location.pathname === to || location.pathname.startsWith(to + '/')

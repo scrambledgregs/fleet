@@ -18,6 +18,8 @@ import Calendar from './pages/Calendar.jsx'
 import Affiliate from './pages/Affiliate.jsx'
 import IndustryPacks from './pages/IndustryPacks.jsx'
 import FloatingCTA from './components/FloatingCTA.jsx'
+import Estimator from "./pages/Estimator";
+import RoofMeasure from "./pages/RoofMeasure";
 import { API_BASE } from './config'
 
 // --- Small inline guard: if no techs yet, send to /onboarding ---
@@ -119,6 +121,8 @@ export default function App() {
           }
         />
         <Route path="/calendar" element={<Calendar />} />
+        <Route path="/estimator" element={<Estimator />} />
+        <Route path="/measure/roof" element={<RoofMeasure />} />
         <Route path="/contacts" element={<ContactsPage />} />
         <Route path="/vehicles" element={<VehiclesPage />} />
         <Route path="/packs" element={<IndustryPacks />} />
