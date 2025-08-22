@@ -28,6 +28,111 @@ const PRICE = {
   laborPerHour: 75,
 }
 
+/** Lightweight address autocomplete for Nominatim */
+function AutocompleteAddress({
+  value,
+  onChange,
+  onPick,
+  placeholder = 'Search by address…',
+}: {
+  value: string
+  onChange: (v: string) => void
+  onPick: (opt: { label: string; lat: number; lon: number }) => void
+  placeholder?: string
+}) {
+  const [open, setOpen] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [options, setOptions] = useState<any[]>([])
+  const cacheRef = useRef<Record<string, any[]>>({})
+  const timerRef = useRef<number | null>(null)
+  const boxRef = useRef<HTMLDivElement | null>(null)
+
+  // Close on outside click
+  useEffect(() => {
+    function onDoc(e: MouseEvent) {
+      if (!boxRef.current) return
+      if (!boxRef.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [])
+
+  // Debounced fetch
+  useEffect(() => {
+    if (!value.trim()) {
+      setOptions([])
+      setOpen(false)
+      return
+    }
+    if (timerRef.current) window.clearTimeout(timerRef.current)
+    timerRef.current = window.setTimeout(async () => {
+      const q = value.trim()
+      if (cacheRef.current[q]) {
+        setOptions(cacheRef.current[q])
+        setOpen(true)
+        return
+      }
+      setLoading(true)
+      try {
+        const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&addressdetails=1&q=${encodeURIComponent(
+          q
+        )}`
+        // In browsers, Referer is sent automatically; UA cannot be set.
+        const r = await fetch(url, { headers: { Accept: 'application/json' } })
+        const j = await r.json().catch(() => [])
+        const opts = Array.isArray(j) ? j : []
+        cacheRef.current[q] = opts
+        setOptions(opts)
+        setOpen(true)
+      } finally {
+        setLoading(false)
+      }
+    }, 300) as unknown as number
+    return () => {
+      if (timerRef.current) window.clearTimeout(timerRef.current)
+    }
+  }, [value])
+
+  return (
+    <div className="relative" ref={boxRef}>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onFocus={() => {
+          if (options.length) setOpen(true)
+        }}
+        placeholder={placeholder}
+        className="w-full bg-black/30 border border-white/10 rounded-none px-2 py-2 text-sm"
+      />
+      {open && (loading || options.length > 0) && (
+        <div className="absolute z-30 mt-1 w-full max-h-56 overflow-auto bg-neutral-900 border border-white/10 rounded-none shadow">
+          {loading && <div className="px-3 py-2 text-xs opacity-70">Searching…</div>}
+          {!loading &&
+            options.map((o) => {
+              const label = o.display_name as string
+              return (
+                <button
+                  key={o.place_id}
+                  type="button"
+                  className="block w-full text-left px-3 py-2 text-sm hover:bg-white/10"
+                  onClick={() => {
+                    setOpen(false)
+                    onPick({ label, lat: Number(o.lat), lon: Number(o.lon) })
+                  }}
+                >
+                  {label}
+                </button>
+              )
+            })}
+          {!loading && options.length === 0 && (
+            <div className="px-3 py-2 text-xs opacity-70">No matches</div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function RoofMeasure() {
   const navigate = useNavigate()
   const mapRef = useRef<HTMLDivElement>(null)
@@ -167,7 +272,7 @@ export default function RoofMeasure() {
 
   async function lookup() {
     if (!addr.trim()) return
-    const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
+    const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&addressdetails=1&q=${encodeURIComponent(
       addr
     )}`
     const r = await fetch(url, { headers: { Accept: 'application/json' } })
@@ -273,13 +378,19 @@ export default function RoofMeasure() {
             <div className="grid grid-cols-12 gap-3 min-h-[60vh]">
               <div className="col-span-12 lg:col-span-9">
                 <div className="flex gap-2 mb-2">
-                  <input
-                    value={addr}
-                    onChange={(e) => setAddr(e.target.value)}
-                    placeholder="Search address…"
-                    className="flex-1 bg-black/30 border border-white/10 rounded-none px-2 py-2 text-sm"
-                  />
-                  <button onClick={lookup} className="px-3 py-2 rounded-none glass text-sm">
+                  <div className="flex-1">
+                    <AutocompleteAddress
+                      value={addr}
+                      onChange={setAddr}
+                      onPick={({ label, lat, lon }) => {
+                        setAddr(label)
+                        const m = mapInstRef.current
+                        if (m) m.setView([lat, lon], 19)
+                      }}
+                      placeholder="Search by address…"
+                    />
+                  </div>
+                  <button onClick={lookup} className="px-3 py-2 rounded-none glass text-sm" disabled={!addr.trim()}>
                     Find
                   </button>
                 </div>

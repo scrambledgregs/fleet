@@ -26,6 +26,7 @@ import emailSendRoute from './routes/emailSend.ts';
 import { SuggestTimesRequestSchema, CreateAppointmentReqSchema, UpsertTechsRequestSchema } from './lib/schemas.js';
 import { generateEstimateItems, draftEstimateCopy } from './lib/estimate-llm.ts'
 import { aiEstimate } from "./lib/estimate.ts";
+import contactsRouter from './routes/contacts.ts';
 
 const geocodeCache = new Map();
 const app = express()
@@ -147,6 +148,9 @@ app.use((req, _res, next) => {
 app.use(createChatterRouter(io));
 app.use('/api', mailgunRoute); 
 app.use('/api', emailSendRoute);
+
+// 👉 Mount the DB-backed contacts router here
+app.use('/api/contacts-db', contactsRouter);
 
 app.post('/api/test-email', async (req, res) => {
   try {
@@ -1696,4 +1700,6 @@ app.get('/__routes', (_req, res) => {
 
 const PORT = process.env.PORT || 8080
 
-server.listen(PORT, () => console.log(`SDC backend (multi-client) on http://localhost:${PORT}`))
+server.listen(PORT, () => {
+  console.log(`SDC backend (multi-client) on http://localhost:${PORT}`)
+})
