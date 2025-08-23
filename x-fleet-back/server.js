@@ -7,7 +7,7 @@ import cors from 'cors';
 import fetch from 'node-fetch';
 import axios from 'axios';
 import { scoreAllReps } from './lib/fit.js';
-import { sendSMS } from './lib/twilio.js';
+import { sendSMS, placeCall, handleIncomingSMS, verifyTwilio } from './lib/twilio.js'
 import { handleInbound as agentHandle } from './lib/agent.js';
 import { recordSms, normalizePhone as phoneE164 } from './lib/chatter.js';
 import {
@@ -268,6 +268,115 @@ app.post('/api/email/draft-and-send', async (req, res) => {
     res.status(500).json({ ok:false, error: e.message || 'draft-and-send failed' });
   }
 });
+
+// --- Voice: place outbound call (used by the power dialer) ---
+app.post('/api/voice/call', async (req, res) => {
+  try {
+    const { to, opts = {} } = req.body || {};
+    if (!to) return res.status(400).json({ ok: false, error: 'to required' });
+
+    // You can tune options here: machineDetection, statusCallback, etc.
+    const r = await placeCall(to, {
+      statusCallback: `${process.env.PUBLIC_URL}/twilio/voice-status`,
+      statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+      ...opts,
+    });
+
+    // Let the UI know a call is starting
+    io.emit('voice:status', { sid: r.sid, status: r.status || 'queued', to });
+    return res.json({ ok: true, sid: r.sid, status: r.status || 'queued' });
+  } catch (e) {
+    console.error('[api/voice/call]', e?.message || e);
+    return res.status(500).json({ ok: false, error: e?.message || 'call failed' });
+  }
+});
+
+// --- Twilio voice status webhook (optional but recommended) ---
+app.post(
+  '/twilio/voice-status',
+  express.urlencoded({ extended: false }),
+  // If you want signature verification:
+  // verifyTwilio(() => `${process.env.PUBLIC_URL}/twilio/voice-status`),
+  async (req, res) => {
+    const { CallSid, CallStatus, From, To, Direction } = req.body || {};
+    io.emit('voice:status', {
+      sid: CallSid,
+      status: CallStatus,
+      from: From,
+      to: To,
+      dir: Direction,
+      at: new Date().toISOString(),
+    });
+    res.type('text/xml').send('<Response/>');
+  }
+);
+
+// --- Twilio recording status webhook (fires when a recording is ready) ---
+app.post(
+  '/twilio/recording-status',
+  express.urlencoded({ extended: false }),
+  // If you want signature verification, uncomment this and ensure PUBLIC_URL is correct:
+  // verifyTwilio(() => `${process.env.PUBLIC_URL}/twilio/recording-status`),
+  async (req, res) => {
+    try {
+      const {
+        CallSid,
+        CallStatus,
+        RecordingSid,
+        RecordingUrl,          // note: Twilio posts URL without file extension
+        RecordingStatus,       // e.g. 'completed'
+        RecordingDuration,     // seconds (string)
+        Timestamp,             // Twilio timestamp
+        To,
+        From,
+      } = req.body || {};
+
+      // Build a direct MP3 URL (Twilio supports .mp3 / .wav)
+      const mp3Url = RecordingUrl ? `${RecordingUrl}.mp3` : null;
+
+      // Emit over websockets so any UI can react instantly
+      io.emit('voice:recording', {
+        callSid: CallSid || null,
+        status: RecordingStatus || 'unknown',
+        url: mp3Url,
+        recordingSid: RecordingSid || null,
+        durationSec: RecordingDuration ? Number(RecordingDuration) : null,
+        to: To || null,
+        from: From || null,
+        callStatus: CallStatus || null,
+        at: new Date().toISOString(),
+      });
+
+      // Optional: persist as a domain event (keeps parity with the rest of your audit trail)
+      try {
+        const clientId = (req.query.clientId || 'default').trim();
+        const ev = createEvent(
+          'call.recording.completed',
+          clientId,
+          {
+            callSid: CallSid || null,
+            recordingSid: RecordingSid || null,
+            url: mp3Url,
+            durationSec: RecordingDuration ? Number(RecordingDuration) : null,
+            to: To || null,
+            from: From || null,
+            timestamp: Timestamp || null,
+          },
+          { source: 'twilio' }
+        );
+        recordAndEmit(io, ev);
+        await dispatchEvent(ev);
+      } catch (persistErr) {
+        console.warn('[recording-status] persist warning:', persistErr?.message || persistErr);
+      }
+
+      res.type('text/xml').send('<Response/>');
+    } catch (e) {
+      console.error('[twilio/recording-status]', e?.message || e);
+      res.type('text/xml').send('<Response/>');
+    }
+  }
+);
 
 // --- Estimate AI: generate structured line items from a free-text prompt ---
 app.post('/api/estimate/ai/items', async (req, res) => {

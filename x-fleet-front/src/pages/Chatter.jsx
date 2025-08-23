@@ -46,6 +46,53 @@ export default function Chatter() {
   const [autopilot, setAutopilot] = useState(true)
   const [composerMode, setComposerMode] = useState('sms') // 'sms' | 'email'
 
+  // NEW: “From” selector (reads env)
+  const fromChoices = useMemo(() => {
+    const env = (import.meta && import.meta.env) || {}
+    const raw =
+      env.VITE_TWILIO_FROM_NUMBERS ||
+      env.VITE_TWILIO_FROM ||
+      '' // comma/space separated or single number
+    return String(raw)
+      .split(/[,\s]+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+  }, [])
+  const [fromNum, setFromNum] = useState(fromChoices[0] || '')
+
+  // recordings bucket (local, event-driven)
+  const REC_OPEN_KEY = 'chatter-rec-open'
+  const [recOpen, setRecOpen] = useState(() => (localStorage.getItem(REC_OPEN_KEY) ?? '1') === '1')
+  const [recItems, setRecItems] = useState([]) // [{id, url, from, to, durationSec, at, status, recordingSid, callSid}]
+
+  useEffect(() => {
+    function onRec(e) {
+      const d = (e.detail || {})
+      const id = d.recordingSid || `${d.callSid || 'call'}:${d.at || Date.now()}`
+      const row = {
+        id,
+        url: d.url || null,
+        from: d.from || null,
+        to: d.to || null,
+        durationSec: typeof d.durationSec === 'number' ? d.durationSec : null,
+        at: d.at || new Date().toISOString(),
+        status: d.status || 'completed',
+        recordingSid: d.recordingSid || null,
+        callSid: d.callSid || null,
+      }
+      setRecItems((prev) => {
+        const dedup = prev.filter((x) => x.id !== id)
+        return [row, ...dedup].slice(0, 15)
+      })
+      setRecOpen(true)
+    }
+    window.addEventListener('voice:recording-ready', onRec)
+    return () => window.removeEventListener('voice:recording-ready', onRec)
+  }, [])
+  useEffect(() => {
+    localStorage.setItem(REC_OPEN_KEY, recOpen ? '1' : '0')
+  }, [recOpen])
+
   const effectiveId = contactId || manualId
   const contactLabel = contactId || manualId || (to ? `manual:${to}` : '—')
 
@@ -290,6 +337,7 @@ export default function Chatter() {
           direction: 'outbound',
           autopilot,
           to: to.trim() || undefined,
+          from: fromNum || undefined, // NEW: pass selected sender (backend may ignore)
         }),
       })
       const j = await r.json().catch(() => ({}))
@@ -434,6 +482,35 @@ export default function Chatter() {
               </div>
             )
           })}
+
+          {/* --- Recordings bucket (inline, collapsible) --- */}
+          <div className="mt-4 border-t border-white/10 pt-3">
+            <div className="flex items-center justify-between">
+              <div className="text-xs font-semibold uppercase tracking-wide text-white/70">
+                Recordings {recItems.length ? `(${recItems.length})` : ''}
+              </div>
+              <button
+                onClick={() => setRecOpen(v => !v)}
+                className="text-xs text-white/60 hover:text-white"
+              >
+                {recOpen ? 'Hide' : 'Show'}
+              </button>
+            </div>
+
+            {recOpen && (
+              <div className="mt-2 space-y-2">
+                {recItems.length === 0 && (
+                  <div className="text-xs text-white/50">
+                    When Twilio finishes a recording, it’ll show up here.
+                  </div>
+                )}
+                {recItems.map((r) => (
+                  <RecordingRow key={r.id} item={r} />
+                ))}
+              </div>
+            )}
+          </div>
+
           <div ref={bottomRef} />
         </div>
 
@@ -463,7 +540,19 @@ export default function Chatter() {
 
           {composerMode === 'sms' ? (
             <>
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-3 flex-wrap">
+                <label className="text-xs text-white/70">From</label>
+                <select
+                  value={fromNum}
+                  onChange={(e) => setFromNum(e.target.value)}
+                  className="w-48 bg-black/30 border border-white/10 rounded-none px-2 py-1 text-sm outline-none focus:border-white/30"
+                >
+                  {fromChoices.length === 0 && <option value="">(env not set)</option>}
+                  {fromChoices.map((n) => (
+                    <option key={n} value={n}>{n}</option>
+                  ))}
+                </select>
+
                 <label className="text-xs text-white/70">To</label>
                 <input
                   value={to}
@@ -471,6 +560,7 @@ export default function Chatter() {
                   placeholder="+1 555 555 0123"
                   className="w-48 bg-black/30 border border-white/10 rounded-none px-2 py-1 text-sm outline-none focus:border-white/30"
                 />
+
                 <span className="text-xs text-white/60">
                   AI Autopilot: <strong>{autopilot ? 'ON' : 'OFF'}</strong>
                 </span>
@@ -511,7 +601,7 @@ Write a short, friendly follow-up about their request.`}
         </div>
       </div>
 
-      {/* RIGHT: Details */}
+      {/* RIGHT: Details (kept minimal; can slide-over later) */}
       <div className="col-span-12 md:col-span-3 glass rounded-none p-2 flex flex-col min-h-0 overflow-auto">
         <div className="text-sm font-semibold mb-2">Details</div>
         {selectedContact ? (
@@ -546,6 +636,54 @@ Write a short, friendly follow-up about their request.`}
         ) : (
           <div className="text-xs text-white/60">Pick a thread to see contact details.</div>
         )}
+      </div>
+    </div>
+  )
+}
+
+/** --- Small recording row component --- */
+function RecordingRow({ item }) {
+  const who = [item.from, '→', item.to].filter(Boolean).join(' ') || 'Call'
+  const when = (() => {
+    const d = item.at ? new Date(item.at) : new Date()
+    const diff = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000))
+    if (diff < 60) return `${diff}s ago`
+    const m = Math.floor(diff / 60)
+    if (m < 60) return `${m}m ago`
+    const h = Math.floor(m / 60)
+    return `${h}h ago`
+  })()
+  const dur = typeof item.durationSec === 'number' ? `${Math.round(item.durationSec)}s` : '—'
+  return (
+    <div className="px-3 py-2 rounded-lg bg-black/30 border border-white/10">
+      <div className="flex items-center justify-between text-xs">
+        <div className="text-white/80 truncate">{who}</div>
+        <div className="text-white/50 ml-2 whitespace-nowrap">{when}</div>
+      </div>
+      <div className="mt-1 text-[11px] text-white/60">
+        SID: {item.recordingSid || item.callSid || '—'} • Duration: {dur} • Status: {item.status || '—'}
+      </div>
+      <div className="mt-2 flex items-center gap-2">
+        <a
+          href={item.url || '#'}
+          target="_blank"
+          rel="noopener noreferrer"
+          className={`inline-flex items-center justify-center h-8 px-3 rounded-lg text-xs font-semibold border ${
+            item.url ? 'text-white border-white/15 hover:bg-white/10' : 'text-white/40 border-white/10 pointer-events-none'
+          }`}
+        >
+          Open
+        </a>
+        <button
+          onClick={async () => { if (item.url) { try { await navigator.clipboard.writeText(item.url) } catch {} } }}
+          disabled={!item.url}
+          className={`inline-flex items-center justify-center h-8 px-3 rounded-lg text-xs font-semibold border ${
+            item.url ? 'text-white border-white/15 hover:bg-white/10' : 'text-white/40 border-white/10'
+          }`}
+          title="Copy link"
+        >
+          Copy link
+        </button>
       </div>
     </div>
   )

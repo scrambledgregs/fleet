@@ -1,19 +1,30 @@
+// src/components/FloatingCTA.tsx
 import { useNavigate, useLocation } from 'react-router-dom'
 
 export default function FloatingCTA() {
   const navigate = useNavigate()
-  const location = useLocation()
+  const { pathname } = useLocation()
 
-  // Hide on affiliate page itself, otherwise show everywhere
-  const hidden = location.pathname.startsWith('/affiliate')
-
-  if (hidden) return null
+  // Hide on the Affiliate page itself
+  if (pathname.startsWith('/affiliate')) return null
 
   return (
     <button
+      type="button"
       onClick={() => navigate('/affiliate')}
-      className="fixed bottom-4 right-4 z-[999] px-4 py-3 rounded-2xl bg-gradient-to-r from-sky-500 to-indigo-600 shadow-lg hover:opacity-95 active:opacity-90 text-white text-sm font-semibold"
-      title="Join our affiliate program"
+      aria-label="Join the affiliate program (earn 40% lifetime revenue)"
+      className={[
+        // placement (bottom-left, safe-area aware)
+        'fixed left-6',
+        'bottom-[calc(env(safe-area-inset-bottom)+1.5rem)]',
+        'z-40', // below PhoneDock/PowerDialer (use z-50 there)
+        // pill styling
+        'inline-flex items-center gap-2 rounded-full px-4 h-12',
+        'bg-gradient-to-r from-sky-500 to-indigo-600',
+        'text-white font-semibold shadow-lg ring-1 ring-white/20',
+        'hover:from-sky-400 hover:to-indigo-500',
+        'focus:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
+      ].join(' ')}
     >
       Earn 40% lifetime revenue
     </button>

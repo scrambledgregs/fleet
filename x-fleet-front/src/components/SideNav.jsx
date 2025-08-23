@@ -1,46 +1,70 @@
-import { CalendarDays, Users, AlertTriangle, MessageSquare, Truck, Calendar as CalendarIcon, Package, Link as LinkIcon, Calculator, History, Clock } from 'lucide-react'
+// src/components/SideNav.jsx
+import { NavLink } from 'react-router-dom'
+import {
+  LayoutGrid, Users, Truck, Calendar, Package, BadgeDollarSign,
+  FileText, MessageSquare, Activity, Bot, Settings
+} from 'lucide-react'
 
-import { NavLink, useLocation } from 'react-router-dom'
-import { Map as MapIcon } from 'lucide-react'
-
-const NAV = [
-  { id: 'planner',   label: 'Jobs',           Icon: CalendarDays,  to: '/' },
-  { id: 'contacts',  label: 'Contacts',       Icon: Users,         to: '/contacts' },
-  { id: 'activity',  label: 'Activity',       Icon: History,       to: '/events' },
-  { id: 'automations', label: 'Automations',  Icon: Clock,         to: '/automations' },
-  { id: 'chatter',   label: 'Chatter',        Icon: MessageSquare, to: '/chatter' },
-  { id: 'estimator', label: 'Estimator',      Icon: Calculator,    to: '/estimator' }, // ← added
-  { id: 'vehicles',  label: 'Vehicles',       Icon: Truck,         to: '/vehicles' },
-  { id: 'calendar',  label: 'Calendar',       Icon: CalendarIcon,  to: '/calendar' },
-  { id: 'packs',     label: 'Industry Packs', Icon: Package,       to: '/packs' },
-   { id: 'affiliate', label: 'Affiliate',      Icon: LinkIcon,      to: '/affiliate' },
+// Order: Dashboard, Jobs (Bookings), Contacts, Calendar, Estimator, Messages, Fleet, Automations, Activity, Industry Packs, Affiliates, Settings
+const LINKS = [
+  { to: '/',        label: 'Dashboard', icon: LayoutGrid, end: true }, // exact match for home
+  { to: '/jobs',    label: 'Bookings',  icon: LayoutGrid },            // your Jobs (DashboardContent)
+  { to: '/contacts',label: 'Contacts',  icon: Users },
+  { to: '/calendar',label: 'Calendar',  icon: Calendar },
+  { to: '/estimator',label: 'Estimator',icon: FileText },
+  { to: '/chatter', label: 'Messages',  icon: MessageSquare },
+  { to: '/vehicles',label: 'Fleet',     icon: Truck },
+  { to: '/automations', label: 'Automations', icon: Bot },
+  { to: '/events',  label: 'Activity',  icon: Activity },
+  { to: '/packs',   label: 'Industry Packs', icon: Package },
+  { to: '/affiliate', label: 'Affiliates', icon: BadgeDollarSign },
+  { to: '/settings', label: 'Settings', icon: Settings },
 ]
 
-export default function SideNav({ active, tab = 'planner', onChange }) {
-  const location = useLocation()
-
+// Render a single row so we can use NavLink’s children-as-a-function
+function LinkRow({ to, end, label, Icon }) {
   return (
-    <nav className="relative z-10 shrink-0 w-14 sm:w-48 border-r border-white/10 pr-1 sm:pr-2 mr-0">
-      <div className="py-1 sm:py-2 flex sm:block gap-1 sm:gap-2">
-        {NAV.map(({ id, label, Icon, to }) => {
-          const isActive = location.pathname === to || location.pathname.startsWith(to + '/')
+    <NavLink
+      to={to}
+      end={!!end}
+      className={({ isActive }) =>
+        [
+          'group relative flex items-center gap-3 rounded-xl px-3 py-2 transition',
+          isActive ? 'bg-white/5 text-white' : 'text-white/75 hover:text-white hover:bg-white/5',
+        ].join(' ')
+      }
+    >
+      {({ isActive }) => (
+        <>
+          <span
+            className={[
+              'absolute left-0 top-1/2 -translate-y-1/2 h-5 w-[3px] rounded-full',
+              isActive
+                ? 'bg-gradient-to-b from-[var(--brand-orange)] to-[var(--brand-orange2)]'
+                : 'bg-transparent group-hover:bg-white/10',
+            ].join(' ')}
+          />
+          <Icon
+            size={18}
+            className={isActive ? 'text-white' : 'text-white/70 group-hover:text-white'}
+          />
+          <span className="truncate">{label}</span>
+        </>
+      )}
+    </NavLink>
+  )
+}
 
-          const base = 'group relative w-12 sm:w-full h-10 sm:h-11 flex items-center justify-center sm:justify-start gap-2 rounded-lg transition px-0 sm:px-3'
-          const cls  = isActive
-            ? `${base} bg-white/10 ring-1 ring-white/20 text-white`
-            : `${base} text-white/70 hover:bg-white/5 hover:text-white`
-
-          return (
-            <NavLink key={id} to={to} className={cls} title={label}>
-              {isActive && (
-                <span className="hidden sm:block absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-6 bg-sky-400 rounded-full" />
-              )}
-              <Icon size={18} className="shrink-0" />
-              <span className="hidden sm:inline text-sm">{label}</span>
-            </NavLink>
-          )
-        })}
-      </div>
+export default function SideNav() {
+  return (
+    <nav className="space-y-1">
+      <ul className="flex flex-col gap-1">
+        {LINKS.map(({ to, label, icon: Icon, end }) => (
+          <li key={to}>
+            <LinkRow to={to} end={end} label={label} Icon={Icon} />
+          </li>
+        ))}
+      </ul>
     </nav>
   )
 }

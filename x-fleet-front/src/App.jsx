@@ -3,7 +3,9 @@ import { useState } from 'react'
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
 import AppShell from './layout/AppShell.jsx'
 
-import DashboardContent from './pages/DashboardContent.jsx'
+// Pages
+import Dashboard from './pages/Dashboard.tsx'            // ← Metrics dashboard (home)
+import DashboardContent from './pages/DashboardContent.jsx' // ← Jobs/Bookings board
 import ContactsPage from './pages/Contacts.jsx'
 import VehiclesPage from './pages/Vehicles.jsx'
 import Calendar from './pages/Calendar.jsx'
@@ -34,14 +36,22 @@ export default function App() {
       <Routes>
         {/* PAGES WITH CHROME */}
         <Route element={<AppShell mode={mode} setMode={setMode} compact={compact} setCompact={setCompact} />}>
+          {/* HOME → Metrics Dashboard */}
           <Route
             index
             element={
               <RequireSetup>
-                <DashboardContent />
+                <Dashboard />
               </RequireSetup>
             }
           />
+          {/* Optional alias for the dashboard */}
+          <Route path="dashboard" element={<Dashboard />} />
+
+          {/* Jobs/Bookings board */}
+          <Route path="jobs" element={<DashboardContent />} />
+
+          {/* Other sections */}
           <Route path="contacts" element={<ContactsPage />} />
           <Route path="vehicles" element={<VehiclesPage />} />
           <Route path="calendar" element={<Calendar />} />
@@ -60,6 +70,9 @@ export default function App() {
         <Route path="/signup" element={<Signup />} />
         <Route path="/onboarding" element={<Onboarding />} />
         <Route path="/requestappointment" element={<RequestAppointment />} />
+
+        {/* Fallback */}
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
 
       <FloatingCTA />
