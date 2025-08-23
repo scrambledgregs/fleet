@@ -1,9 +1,10 @@
 // src/components/JobDetails.jsx
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Phone, Mail, MapPin, Tag, Building2 } from 'lucide-react'
 import { API_BASE } from '../config'
 import { Link } from 'react-router-dom'
 import JobMessages from './JobMessages'
+import { getTenantId, withTenant } from '../lib/socket'
 
 // ---------- helpers ----------
 function addrToString(a) {
@@ -139,6 +140,9 @@ function Row({ label, children }) {
 
 // ---------- component ----------
 export default function JobDetails({ jobId, seed, onClose }) {
+  const tenantId = useMemo(() => getTenantId(), [])
+  const API_HTTP_BASE = `${API_BASE}`.endsWith('/api') ? API_BASE : `${API_BASE}/api`
+
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
 
@@ -161,7 +165,10 @@ export default function JobDetails({ jobId, seed, onClose }) {
           return
         }
 
-        const r = await fetch(`${API_BASE}/api/job/${encodeURIComponent(jobId)}`)
+        const url = new URL(`${API_HTTP_BASE}/job/${encodeURIComponent(jobId)}`)
+        url.searchParams.set('clientId', tenantId)
+
+        const r = await fetch(url.toString(), withTenant())
         if (!r.ok) throw new Error('no job')
         const d = await r.json()
         if (!alive) return
@@ -179,7 +186,7 @@ export default function JobDetails({ jobId, seed, onClose }) {
     return () => {
       alive = false
     }
-  }, [jobId, seed])
+  }, [jobId, seed, tenantId, API_HTTP_BASE])
 
   // seed edit controls once data is available
   useEffect(() => {
@@ -196,18 +203,18 @@ export default function JobDetails({ jobId, seed, onClose }) {
     const id = jobId || seed?.appointmentId || seed?.id || data?.appointmentId
     if (!id) return
 
-    const payload = {}
+    const payload = { clientId: tenantId }
     if (editStart) payload.startTime = editStart
     if (editEnd) payload.endTime = editEnd
     if (editAssignee) payload.assignedUserId = String(editAssignee)
 
     try {
       setSaving(true)
-      await fetch(`${API_BASE}/api/jobs/${encodeURIComponent(id)}`, {
+      await fetch(`${API_HTTP_BASE}/jobs/${encodeURIComponent(id)}`, withTenant({
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
-      })
+      }))
       setData(prev =>
         prev
           ? {
@@ -271,7 +278,7 @@ export default function JobDetails({ jobId, seed, onClose }) {
           <div className="text-xs text-white/60">Job</div>
           <div className="text-lg font-semibold">#{data.appointmentId}</div>
           <Link
-            to={`/calendar?date=${encodeURIComponent(data.startTime)}&assigned=${encodeURIComponent(data.assignedUserId ?? '')}&id=${encodeURIComponent(data.appointmentId)}`}
+            to={`/calendar?clientId=${encodeURIComponent(tenantId)}&date=${encodeURIComponent(data.startTime)}&assigned=${encodeURIComponent(assignedUserId ?? '')}&id=${encodeURIComponent(data.appointmentId)}`}
             onClick={onClose}
             className="ml-2 text-xs underline text-blue-400 hover:text-blue-300"
           >
@@ -300,7 +307,7 @@ export default function JobDetails({ jobId, seed, onClose }) {
                 )}
 
                 <Link
-                  to={c.id ? `/chatter/${encodeURIComponent(c.id)}` : '#'}
+                  to={c.id ? `/chatter/${encodeURIComponent(c.id)}?clientId=${encodeURIComponent(tenantId)}` : '#'}
                   onClick={(e) => {
                     if (!c.id) { e.preventDefault(); return }
                     onClose?.()
@@ -463,7 +470,7 @@ export default function JobDetails({ jobId, seed, onClose }) {
             <div className="mt-2 text-sm">
               Assigned to:{' '}
               <span className="text-white/90">
-                {data.assignedRepName ?? (data.assignedUserId ? `#${data.assignedUserId}` : 'Unassigned')}
+                {assignedRepName ?? (assignedUserId ? `#${assignedUserId}` : 'Unassigned')}
               </span>
             </div>
 

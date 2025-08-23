@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Phone, PhoneCall, Send, X } from 'lucide-react'
-import { io, Socket } from 'socket.io-client'
+import type { Socket } from 'socket.io-client'
+import { makeSocket, getTenantId, withTenant } from '../lib/socket'
 import { API_BASE } from '../config'
 
 type SMS = {
@@ -11,6 +12,8 @@ type SMS = {
   to?: string
   from?: string
 }
+
+const API_HTTP_BASE = `${API_BASE}`.endsWith('/api') ? API_BASE : `${API_BASE}/api`
 
 function fmtTime(iso: string) {
   try {
@@ -29,6 +32,7 @@ function normalizePhone(input: string) {
 }
 
 export default function PhoneDock() {
+  const tenantId = useMemo(() => getTenantId(), [])
   const [open, setOpen] = useState(false)
   const [to, setTo] = useState<string>(() => localStorage.getItem('phonedock.to') || '')
   const [text, setText] = useState('')
@@ -46,12 +50,21 @@ export default function PhoneDock() {
   useEffect(() => { localStorage.setItem('phonedock.feed', JSON.stringify(feed.slice(-300))) }, [feed])
   useEffect(() => { if (open) setUnseen(0) }, [open])
 
-  // socket: connect once
+  // socket: connect once (tenant-scoped via makeSocket)
   const socket = useRef<Socket | null>(null)
   useEffect(() => {
-    const base = API_BASE || `${location.protocol}//${location.hostname}:${location.port}`
-    const s = io(base, { path: '/socket.io', transports: ['websocket', 'polling'] })
+    if (socket.current) return
+    const s = makeSocket()
     socket.current = s
+
+    s.on('connect', () => {
+      // eslint-disable-next-line no-console
+      console.log('[socket] connected', s.id)
+    })
+    s.on('disconnect', (reason) => {
+      // eslint-disable-next-line no-console
+      console.log('[socket] disconnected:', reason)
+    })
 
     s.on('sms:inbound', (m: any) => {
       const item: SMS = {
@@ -76,7 +89,11 @@ export default function PhoneDock() {
       setFeed((f) => f.concat(item))
     })
 
-    return () => { s.close() }
+    return () => {
+      s.removeAllListeners()
+      s.disconnect()
+      socket.current = null
+    }
   }, [open])
 
   const items = useMemo(() => feed.slice(-300), [feed])
@@ -99,11 +116,11 @@ export default function PhoneDock() {
     setText('')
 
     try {
-      const r = await fetch(`${API_BASE}/api/sms/send`, {
+      const r = await fetch(`${API_HTTP_BASE}/sms/send`, withTenant({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ to: dest, text: body }),
-      })
+        body: JSON.stringify({ to: dest, text: body, clientId: tenantId }),
+      }))
       const j = await r.json().catch(() => ({}))
       if (!j?.ok) {
         setFeed((f) =>

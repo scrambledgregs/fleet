@@ -1,11 +1,11 @@
-// src/App.jsx
-import { useState } from 'react'
+// x-fleet-front/src/App.tsx
+import { useState, type ReactNode } from 'react'
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
 import AppShell from './layout/AppShell.jsx'
 
 // Pages
-import Dashboard from './pages/Dashboard.tsx'            // ← Metrics dashboard (home)
-import DashboardContent from './pages/DashboardContent.jsx' // ← Jobs/Bookings board
+import Dashboard from './pages/Dashboard'                // Metrics dashboard (home)
+import DashboardContent from './pages/DashboardContent.jsx'  // Jobs/Bookings board (expects mode/compact props)
 import ContactsPage from './pages/Contacts.jsx'
 import VehiclesPage from './pages/Vehicles.jsx'
 import Calendar from './pages/Calendar.jsx'
@@ -15,27 +15,35 @@ import Estimator from './pages/Estimator'
 import RoofMeasure from './pages/RoofMeasure'
 import Chatter from './pages/Chatter'
 import EventsPage from './pages/EventsPage'
-import Settings from './pages/Settings.jsx'
+import Settings from './pages/Settings'
 import Onboarding from './pages/Onboarding.jsx'
 import Signup from './pages/Signup.jsx'
 import AutomationsPage from './pages/Automations'
 import RequestAppointment from './pages/RequestAppointment.jsx'
 import FloatingCTA from './components/FloatingCTA.jsx'
 
-// If you still want the techs check, re-add your effect here
-function RequireSetup({ children }) {
-  return children
+function RequireSetup({ children }: { children: ReactNode }) {
+  return <>{children}</>
 }
 
 export default function App() {
-  const [mode, setMode] = useState('Approve')
+  const [mode, setMode] = useState<'Approve' | 'Auto'>('Approve')
   const [compact, setCompact] = useState(false)
 
   return (
     <Router>
       <Routes>
         {/* PAGES WITH CHROME */}
-        <Route element={<AppShell mode={mode} setMode={setMode} compact={compact} setCompact={setCompact} />}>
+        <Route
+          element={
+            <AppShell
+              mode={mode}
+              setMode={setMode}
+              compact={compact}
+              setCompact={setCompact}
+            />
+          }
+        >
           {/* HOME → Metrics Dashboard */}
           <Route
             index
@@ -45,11 +53,21 @@ export default function App() {
               </RequireSetup>
             }
           />
-          {/* Optional alias for the dashboard */}
+          {/* Aliases for the dashboard */}
           <Route path="dashboard" element={<Dashboard />} />
+          <Route path="home" element={<Navigate to="/" replace />} />
 
           {/* Jobs/Bookings board */}
-          <Route path="jobs" element={<DashboardContent />} />
+          <Route
+            path="jobs"
+            element={
+              <DashboardContent
+                mode={mode}
+              />
+            }
+          />
+          {/* Alias so old links to /bookings still work */}
+          <Route path="bookings" element={<Navigate to="/jobs" replace />} />
 
           {/* Other sections */}
           <Route path="contacts" element={<ContactsPage />} />

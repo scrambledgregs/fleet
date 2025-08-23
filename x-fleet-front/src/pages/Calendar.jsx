@@ -3,10 +3,9 @@ import { useEffect, useMemo, useState, useRef, useCallback } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import JobDetails from '../components/JobDetails.jsx'
 import { API_BASE } from '../config'
-import { io } from 'socket.io-client'
+import { makeSocket, getTenantId } from '../lib/socket'
 
 const API_HTTP_BASE = `${API_BASE}`.endsWith('/api') ? API_BASE : `${API_BASE}/api`
-const SOCKET_BASE_FROM_API = `${API_BASE}`.replace(/\/api\/?$/, '')
 
 export default function Calendar() {
   const navigate = useNavigate()
@@ -40,7 +39,10 @@ export default function Calendar() {
   const loadWeek = useCallback(async () => {
     try {
       setLoading(true)
-      const r = await fetch(`${API_HTTP_BASE}/week-appointments`)
+      const url = new URL(`${API_HTTP_BASE}/week-appointments`)
+      // pass tenant so HTTP + socket see the same scope
+      url.searchParams.set('clientId', getTenantId())
+      const r = await fetch(url.toString())
       const j = await r.json()
       if (!Array.isArray(j)) throw new Error('Bad response')
       setItems(j)
@@ -120,20 +122,23 @@ export default function Calendar() {
     return entry ? entry.rows : []
   }, [byDay, dayKey])
 
+  // tenant-scoped socket
   const socketRef = useRef(null)
   useEffect(() => {
-    const s = io(SOCKET_BASE_FROM_API, { transports: ['websocket'] })
+    const s = makeSocket()
     socketRef.current = s
     const refresh = () => loadWeek()
     s.on('connect', refresh)
     s.on('job:created', refresh)
     s.on('job:updated', refresh)
     s.on('ai:booking', refresh)
+    s.on('ai:suggestion', refresh)
     return () => {
       s.off('connect', refresh)
       s.off('job:created', refresh)
       s.off('job:updated', refresh)
       s.off('ai:booking', refresh)
+      s.off('ai:suggestion', refresh)
       s.close()
     }
   }, [loadWeek])
@@ -144,8 +149,6 @@ export default function Calendar() {
       <div className="grid grid-cols-12 gap-4">
         {/* Controls */}
         <div className="col-span-12 md:col-span-3 glass rounded-none p-3">
-         
-
           <div className="space-y-3">
             <div>
               <div className="text-xs text-white/60 mb-1">View</div>

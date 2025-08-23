@@ -1,15 +1,17 @@
-// src/pages/Chatter.jsx
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { useEffect, useState, useMemo, useRef } from 'react'
-import { io } from 'socket.io-client'
 import { API_BASE } from '../config'
 import EmailDraftComposer from '../components/EmailDraftComposer'
+import { makeSocket, getTenantId, withTenant } from '../lib/socket'
 
 export default function Chatter() {
   const { contactId } = useParams()
   const navigate = useNavigate()
   const bottomRef = useRef(null)
   const inputRef = useRef(null)
+
+  // tenant (shared for sockets + HTTP)
+  const tenantId = useMemo(() => getTenantId(), [])
 
   // Measure the composer so we can pad the message list accordingly
   const composerRef = useRef(null)
@@ -26,7 +28,8 @@ export default function Chatter() {
     return () => ro.disconnect()
   }, [])
 
-  const socket = useMemo(() => io(API_BASE, { transports: ['websocket'] }), [])
+  // tenant-scoped socket
+  const socket = useMemo(() => makeSocket(), [])
 
   // conversations (left rail)
   const [contacts, setContacts] = useState([])
@@ -134,7 +137,7 @@ export default function Chatter() {
     ;(async () => {
       try {
         setContactsLoading(true)
-        const r = await fetch(`${API_BASE}/api/contacts`)
+        const r = await fetch(`${API_BASE}/api/contacts?clientId=${encodeURIComponent(tenantId)}`, withTenant())
         const j = await r.json()
         if (!alive) return
         setContacts(Array.isArray(j.contacts) ? j.contacts : [])
@@ -145,7 +148,7 @@ export default function Chatter() {
       }
     })()
     return () => { alive = false }
-  }, [])
+  }, [tenantId])
 
   const selectedContact = useMemo(
     () => contacts.find(c => String(c.id) === String(contactId)),
@@ -164,26 +167,33 @@ export default function Chatter() {
         }
 
         // ensure conversation
-        const r1 = await fetch(`${API_BASE}/api/mock/ghl/contact/${encodeURIComponent(effectiveId)}/conversations`)
+        const r1 = await fetch(
+          `${API_BASE}/api/mock/ghl/contact/${encodeURIComponent(effectiveId)}/conversations?clientId=${encodeURIComponent(tenantId)}`,
+          withTenant()
+        )
         const j1 = await r1.json()
         let convoId = j1?.conversations?.[0]?.id
 
         if (!convoId) {
-          const r2 = await fetch(`${API_BASE}/api/mock/ghl/send-message`, {
+          const r2 = await fetch(`${API_BASE}/api/mock/ghl/send-message`, withTenant({
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               contactId: effectiveId,
               text: '(test) First message',
               direction: 'outbound',
+              clientId: tenantId,
             }),
-          })
+          }))
           const j2 = await r2.json()
           convoId = j2.conversationId
         }
 
         // fetch + normalize messages
-        const r3 = await fetch(`${API_BASE}/api/mock/ghl/conversation/${encodeURIComponent(convoId)}/messages`)
+        const r3 = await fetch(
+          `${API_BASE}/api/mock/ghl/conversation/${encodeURIComponent(convoId)}/messages?clientId=${encodeURIComponent(tenantId)}`,
+          withTenant()
+        )
         const j3 = await r3.json()
         if (!alive) return
 
@@ -206,7 +216,7 @@ export default function Chatter() {
       }
     })()
     return () => { alive = false }
-  }, [effectiveId])
+  }, [effectiveId, tenantId])
 
   // live updates
   useEffect(() => {
@@ -262,7 +272,6 @@ export default function Chatter() {
   const lastFetchedPhoneRef = useRef('')
   const lastFetchAtRef = useRef({}); // phone -> last fetch timestamp (ms)
   const autopilotFetchInflight = useRef(false);
-  const debounceRef = useRef(0)
 
   const sanitizePhone = (p = '') => {
     const digits = String(p).replace(/\D/g, '')
@@ -288,7 +297,10 @@ export default function Chatter() {
     lastFetchedPhoneRef.current = phone;
 
     try {
-      const r = await fetch(`${API_BASE}/api/agent/state?phone=${encodeURIComponent(phone)}`);
+      const r = await fetch(
+        `${API_BASE}/api/agent/state?phone=${encodeURIComponent(phone)}&clientId=${encodeURIComponent(tenantId)}`,
+        withTenant()
+      );
       const j = await r.json();
       if (j?.ok) setAutopilot(!!j.state?.autopilot);
     } catch {
@@ -311,11 +323,11 @@ export default function Chatter() {
     const phone = idToPhone(effectiveId, to);
     if (!phone) return;
     try {
-      await fetch(`${API_BASE}/api/agent/autopilot`, {
+      await fetch(`${API_BASE}/api/agent/autopilot`, withTenant({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone, enabled: next }),
-      });
+        body: JSON.stringify({ phone, enabled: next, clientId: tenantId }),
+      }));
     } catch {}
   }
 
@@ -328,7 +340,7 @@ export default function Chatter() {
 
     try {
       setSending(true)
-      const r = await fetch(`${API_BASE}/api/mock/ghl/send-message`, {
+      const r = await fetch(`${API_BASE}/api/mock/ghl/send-message`, withTenant({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -337,9 +349,10 @@ export default function Chatter() {
           direction: 'outbound',
           autopilot,
           to: to.trim() || undefined,
-          from: fromNum || undefined, // NEW: pass selected sender (backend may ignore)
+          from: fromNum || undefined,
+          clientId: tenantId,
         }),
-      })
+      }))
       const j = await r.json().catch(() => ({}))
       if (!r.ok || j?.ok === false) throw new Error(j?.error || 'Failed to send')
 

@@ -1,7 +1,21 @@
 // src/pages/RequestAppointment.jsx
 import { useMemo, useState } from 'react'
-import { Calendar, Clock, MapPin, Mail, Phone, User, Wrench, Package, ArrowLeft, CheckCircle2, Loader2, Sparkles } from 'lucide-react'
+import {
+  Calendar,
+  Clock,
+  MapPin,
+  Mail,
+  Phone,
+  User,
+  Wrench,
+  Package,
+  ArrowLeft,
+  CheckCircle2,
+  Loader2,
+  Sparkles,
+} from 'lucide-react'
 import { API_BASE } from '../config'
+import { getTenantId, withTenant } from '../lib/socket'
 
 const jobTypes = [
   { key: 'Repair', icon: Wrench, label: 'Repair' },
@@ -55,6 +69,13 @@ function Section({ title, children, right }) {
 }
 
 export default function RequestAppointment() {
+  const tenantId = useMemo(() => getTenantId(), [])
+  const localTz = useMemo(() => Intl.DateTimeFormat().resolvedOptions().timeZone, [])
+  const isEmbed = useMemo(() => {
+    const p = new URLSearchParams(window.location.search)
+    return p.get('embed') === '1' || p.get('mode') === 'public'
+  }, [])
+
   const [form, setForm] = useState({
     name: '',
     email: '',
@@ -73,8 +94,6 @@ export default function RequestAppointment() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
 
-  const localTz = useMemo(() => Intl.DateTimeFormat().resolvedOptions().timeZone, [])
-
   function handleChange(e) {
     const { name, value } = e.target
     setForm((prev) => ({ ...prev, [name]: value }))
@@ -88,18 +107,23 @@ export default function RequestAppointment() {
     setSelectedTime(null)
 
     try {
-      const res = await fetch(`${API_BASE}/api/suggest-times`, {
+      const res = await fetch(`${API_BASE}/api/suggest-times`, withTenant({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          date: form.date,                // required
+          clientId: tenantId,
+          date: form.date,                              // required by backend
           timezone: localTz || 'America/New_York',
           address: form.address,
           jobType: form.jobType,
           estValue: form.estValue,
           territory: form.territory,
+          // sensible defaults for schema
+          durationMin: 60,
+          bufferMin: 15,
+          maxDetourMin: 60,
         }),
-      })
+      }))
       const data = await res.json()
       if (res.ok && data.ok && Array.isArray(data.suggestions)) {
         setSuggestions(data.suggestions)
@@ -107,7 +131,7 @@ export default function RequestAppointment() {
       } else {
         setError(data.error || 'No suggestions available')
       }
-    } catch (err) {
+    } catch {
       setError('Failed to fetch suggestions')
     } finally {
       setLoading(false)
@@ -130,23 +154,24 @@ export default function RequestAppointment() {
         jobType: form.jobType,
         estValue: form.estValue,
         territory: form.territory,
-        // send UTC ISO — backend already normalizes
+        // send UTC ISO — backend normalizes zones/offsets
         startTime: new Date(selectedTime.start).toISOString(),
         endTime: new Date(selectedTime.end).toISOString(),
+        clientId: tenantId,
       }
 
-      const res = await fetch(`${API_BASE}/api/create-appointment`, {
+      const res = await fetch(`${API_BASE}/api/create-appointment`, withTenant({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
-      })
+      }))
       const data = await res.json()
       if (data.ok) {
         setConfirmed(true)
       } else {
         setError(data.error || 'Unable to confirm appointment')
       }
-    } catch (e) {
+    } catch {
       setError('Unexpected error while confirming')
     } finally {
       setSubmitting(false)
@@ -156,11 +181,13 @@ export default function RequestAppointment() {
   const showStep2 = suggestions.length > 0 && !confirmed
 
   return (
-    <div className="min-h-screen px-4 py-6 md:px-8 md:py-10 text-white">
+    <div className={`min-h-screen px-4 py-6 md:px-8 md:py-10 text-white ${isEmbed ? 'bg-transparent' : ''}`}>
       <div className="mx-auto max-w-4xl space-y-6">
         <div className="flex items-center gap-2">
           <Sparkles className="h-5 w-5 text-yellow-300/90" />
-          <h1 className="text-2xl font-semibold">Request an Appointment</h1>
+          <h1 className="text-2xl font-semibold">
+            {isEmbed ? 'Book a visit' : 'Request an Appointment'}
+          </h1>
         </div>
 
         {/* Step 1 — Details */}
@@ -270,16 +297,18 @@ export default function RequestAppointment() {
                 />
               </FieldWrap>
 
-              <FieldWrap>
-                <Label>Territory</Label>
-                <Select name="territory" value={form.territory} onChange={handleChange}>
-                  {territories.map((t) => (
-                    <option key={t} value={t}>
-                      {t}
-                    </option>
-                  ))}
-                </Select>
-              </FieldWrap>
+              {!isEmbed && (
+                <FieldWrap>
+                  <Label>Territory</Label>
+                  <Select name="territory" value={form.territory} onChange={handleChange}>
+                    {territories.map((t) => (
+                      <option key={t} value={t}>
+                        {t}
+                      </option>
+                    ))}
+                  </Select>
+                </FieldWrap>
+              )}
 
               <FieldWrap>
                 <Label>Preferred Day</Label>
@@ -358,14 +387,14 @@ export default function RequestAppointment() {
                       ].join(' ')}
                     >
                       <div className="flex items-center justify-between">
-                        <div className="font-medium">{start} – {end}</div>
+                        <div className="font-medium">
+                          {start} – {end}
+                        </div>
                         <div className="text-xs rounded-full bg-white/10 px-2 py-0.5">
                           {s.territory || form.territory}
                         </div>
                       </div>
-                      <div className="mt-2 text-sm text-white/70">
-                        {s.reason || 'Fits route'}
-                      </div>
+                      <div className="mt-2 text-sm text-white/70">{s.reason || 'Fits route'}</div>
                       {typeof s?.travel?.total === 'number' && (
                         <div className="mt-2 text-xs text-white/60">
                           Travel: {s.travel.total}m
@@ -384,7 +413,11 @@ export default function RequestAppointment() {
                   disabled={!selectedTime || submitting}
                   className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-medium hover:bg-emerald-500 disabled:opacity-60"
                 >
-                  {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                  {submitting ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <CheckCircle2 className="h-4 w-4" />
+                  )}
                   {submitting ? 'Booking…' : 'Confirm Appointment'}
                 </button>
               </div>
@@ -394,10 +427,7 @@ export default function RequestAppointment() {
 
         {/* Step 3 — Confirmation */}
         {confirmed && selectedTime && (
-          <Section
-            title="Appointment Confirmed"
-            right={<CheckCircle2 className="h-5 w-5 text-emerald-400" />}
-          >
+          <Section title="Appointment Confirmed" right={<CheckCircle2 className="h-5 w-5 text-emerald-400" />}>
             <div className="space-y-2">
               <div className="text-white/90">
                 We’ve booked your appointment for{' '}
@@ -414,8 +444,8 @@ export default function RequestAppointment() {
                 .
               </div>
               <div className="text-sm text-white/70">
-                You’ll get a confirmation message shortly. Need to make a change? Just reply to that
-                message or contact support.
+                You’ll get a confirmation message shortly. Need to make a change? Just reply to that message or contact
+                support.
               </div>
             </div>
           </Section>
