@@ -1,6 +1,7 @@
 // src/pages/Dashboard.tsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import { withTenant } from '../lib/socket'
 import { API_BASE } from "../config";
 import {
   Briefcase,
@@ -112,24 +113,56 @@ export default function Dashboard() {
     localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
   }, [rangeMode, rangeDays, customStart, customEnd, showSales, showLeads, showBusiest, showSchedule]);
 
-  // ---- Data fetch ----
-  async function load() {
+  // ---- Data fetch (StrictMode-safe single poller) ----
+  const pollRef = useRef<number | null>(null);
+  const controllerRef = useRef<AbortController | null>(null);
+
+  const load = async () => {
     try {
-      setLoading(true);
+      controllerRef.current?.abort();
+      const controller = new AbortController();
+      controllerRef.current = controller;
+
+      const opt = withTenant({ signal: controller.signal });
+
       const [eRes, wRes] = await Promise.all([
-        fetch(`${API_BASE}/api/events?limit=1000`).then(r => r.json()).catch(() => ({ ok:false })),
-        fetch(`${API_BASE}/api/week-appointments`).then(r => r.json()).catch(() => []),
+        fetch(`${API_BASE}/api/events?limit=1000`, opt).then(r => r.json()).catch(() => ({ ok:false })),
+        fetch(`${API_BASE}/api/week-appointments`, opt).then(r => r.json()).catch(() => []),
       ]);
+
       if (eRes?.ok && Array.isArray(eRes.events)) setEvents(eRes.events);
       if (Array.isArray(wRes)) setWeek(wRes);
-    } finally { setLoading(false); }
-  }
+    } catch (e) {
+      // ignore aborts
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
+    if (pollRef.current !== null) return; // guard duplicate intervals (StrictMode/dev)
+
+    setLoading(true);
     load();
-    const t = setInterval(load, 10_000);
-    return () => clearInterval(t);
+
+    pollRef.current = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      load();
+    }, 30000);
+
+    return () => {
+      if (pollRef.current !== null) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+      controllerRef.current?.abort();
+    };
   }, []);
-  async function manualRefresh() { setRefreshing(true); try { await load(); } finally { setRefreshing(false); } }
+
+  async function manualRefresh() {
+    setRefreshing(true);
+    try { await load(); } finally { setRefreshing(false); }
+  }
 
   // ---- Range helpers ----
   const rangeInfo = useMemo(() => {
@@ -583,7 +616,7 @@ export default function Dashboard() {
                     <span className="font-medium">{labelForEvent(e.type)}</span>
                     {renderEventInline(e)}
                   </div>
-                  <div className="text-[11px] text-white/60 mt-0.5">{new Date(e.at).toLocaleString()}</div>
+                  <div className="text=[11px] text-white/60 mt-0.5">{new Date(e.at).toLocaleString()}</div>
                 </div>
               ))}
             </div>

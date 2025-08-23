@@ -7,6 +7,7 @@ import cors from 'cors';
 import fetch from 'node-fetch';
 import axios from 'axios';
 
+
 import { scoreAllReps } from './lib/fit.js';
 import { sendSMS, placeCall } from './lib/twilio.js';
 import { handleInbound as agentHandle } from './lib/agent.js';
@@ -125,7 +126,8 @@ async function getDriveMinutes(from, to) {
   )
     return null;
 
-  const hit = driveCache.get({ from, to });
+  const key = `${from.lat},${from.lng}|${to.lat},${to.lng}`;
+  const hit = driveCache.get(key);
   if (hit != null) return hit;
 
   const apiKey = process.env.GOOGLE_MAPS_API_KEY;
@@ -144,7 +146,7 @@ async function getDriveMinutes(from, to) {
     const seconds = elem?.duration_in_traffic?.value ?? elem?.duration?.value;
     if (typeof seconds === 'number') {
       const minutes = Math.round(seconds / 60);
-      driveCache.set({ from, to }, minutes);
+      driveCache.set(key, minutes);
       return minutes;
     }
   } catch (e) {
@@ -206,6 +208,171 @@ app.use('/api', mailgunRoute);
 app.use('/api', emailSendRoute);
 app.use('/api/contacts-db', contactsRouter);
 app.use('/api', registerAutomationRoutes());
+
+/* --- Internal Chat (tenant-scoped Slack-lite) --- */
+const channelsByClient = new Map();
+const channelMessagesByClient = new Map();
+const channelReadsByClient = new Map();
+
+function bag(map, clientId) {
+  const id = (clientId || 'default').trim();
+  if (!map.has(id)) map.set(id, new Map());
+  return map.get(id);
+}
+function listChannels(clientId) {
+  const id = (clientId || 'default').trim();
+  if (!channelsByClient.has(id)) channelsByClient.set(id, []);
+  return channelsByClient.get(id);
+}
+function listMessages(clientId, channelId) {
+  const msgsByChan = bag(channelMessagesByClient, clientId);
+  if (!msgsByChan.has(channelId)) msgsByChan.set(channelId, []);
+  return msgsByChan.get(channelId);
+}
+function readMap(clientId, channelId) {
+  const readsByChan = bag(channelReadsByClient, clientId);
+  if (!readsByChan.has(channelId)) readsByChan.set(channelId, new Map());
+  return readsByChan.get(channelId);
+}
+
+function ensureChannel(clientId, { name, topic = '', members = [] }) {
+  const list = listChannels(clientId);
+  const existing = list.find(c => c.name.toLowerCase() === String(name).toLowerCase());
+  if (existing) return existing;
+  const ch = {
+    id: newId('chn_'),
+    name: String(name).trim().slice(0, 80),
+    topic: String(topic || '').slice(0, 200),
+    members: Array.isArray(members) ? members.filter(Boolean) : [],
+    createdAt: new Date().toISOString(),
+    lastMessageAt: null,
+  };
+  list.push(ch);
+  return ch;
+}
+
+if (process.env.SEED_DEMO_CHANNELS === 'true') {
+  ensureChannel('default', { name: 'sales', topic: 'Sales team huddle' });
+  ensureChannel('default', { name: 'ops', topic: 'Dispatch & operations' });
+}
+
+app.get('/api/chat/channels', (req, res) => {
+  const clientId = (req.query.clientId || req.tenantId || 'default').trim();
+  const items = listChannels(clientId).slice().sort((a, b) => {
+    const ta = new Date(a.lastMessageAt || a.createdAt).getTime();
+    const tb = new Date(b.lastMessageAt || b.createdAt).getTime();
+    return tb - ta;
+  });
+  res.json({ ok: true, clientId, channels: items });
+});
+
+app.post('/api/chat/channels', (req, res) => {
+  const clientId = (req.body.clientId || req.tenantId || 'default').trim();
+  const { name, topic = '', members = [] } = req.body || {};
+  if (!name || !String(name).trim()) return res.status(400).json({ ok: false, error: 'name required' });
+  const ch = ensureChannel(clientId, { name, topic, members });
+  emitTenant(clientId, 'chat:channel:created', { channel: ch });
+  res.status(201).json({ ok: true, channel: ch });
+});
+
+app.get('/api/chat/channels/:id/messages', (req, res) => {
+  const clientId = (req.query.clientId || req.tenantId || 'default').trim();
+  const channelId = req.params.id;
+  const limit = Math.max(1, Math.min(200, Number(req.query.limit) || 50));
+  const afterRaw = req.query.after ? new Date(String(req.query.after)) : null;
+  const afterISO = afterRaw && !isNaN(afterRaw.getTime()) ? afterRaw.toISOString() : null;
+  const all = listMessages(clientId, channelId);
+  let out = all;
+  if (afterISO) {
+    const t = new Date(afterISO).getTime();
+    out = all.filter(m => new Date(m.at).getTime() > t);
+  }
+  out = out.slice(-limit);
+  res.json({ ok: true, clientId, channelId, count: out.length, messages: out });
+});
+
+app.post('/api/chat/channels/:id/messages', async (req, res) => {
+  try {
+    const clientId = (req.body.clientId || req.tenantId || 'default').trim();
+    const channelId = req.params.id;
+    const { userId, userName, text, attachments = [] } = req.body || {};
+    if (!userId || !text) return res.status(400).json({ ok: false, error: 'userId and text required' });
+
+    const ch = listChannels(clientId).find(c => c.id === channelId);
+    if (!ch) return res.status(404).json({ ok: false, error: 'channel not found' });
+
+    const msg = {
+      id: newId('msg_'),
+      channelId,
+      userId: String(userId),
+      userName: String(userName || '').slice(0, 80) || 'User',
+      text: String(text).slice(0, 10000),
+      attachments: Array.isArray(attachments) ? attachments.slice(0, 5) : [],
+      at: new Date().toISOString(),
+    };
+
+    const msgs = listMessages(clientId, channelId);
+    msgs.push(msg);
+    ch.lastMessageAt = msg.at;
+
+    emitTenant(clientId, 'chat:message', { channelId, message: msg });
+
+    try {
+      const ev = createEvent(
+        'chat.message.created',
+        clientId,
+        { channelId, message: msg },
+        { source: 'chat', idempotencyKey: `${clientId}:${channelId}:${msg.id}` }
+      );
+      recordAndEmit(ioForTenant(clientId), ev);
+      await dispatchEvent(ev);
+    } catch (e) {
+      console.warn('[chat.message.created] dispatch warn:', e?.message || e);
+    }
+
+    res.status(201).json({ ok: true, message: msg });
+  } catch (e) {
+    console.error('[POST /api/chat/.../messages]', e);
+    res.status(500).json({ ok: false, error: 'send_failed' });
+  }
+});
+
+app.post('/api/chat/channels/:id/typing', (req, res) => {
+  const clientId = (req.body.clientId || req.tenantId || 'default').trim();
+  const channelId = req.params.id;
+  const { userId, userName, isTyping = true } = req.body || {};
+  if (!userId) return res.status(400).json({ ok: false, error: 'userId required' });
+
+  emitTenant(clientId, 'chat:typing', {
+    channelId,
+    userId: String(userId),
+    userName: String(userName || ''),
+    isTyping: !!isTyping,
+    at: new Date().toISOString(),
+  });
+  res.json({ ok: true });
+});
+
+app.post('/api/chat/channels/:id/read', (req, res) => {
+  const clientId = (req.body.clientId || req.tenantId || 'default').trim();
+  const channelId = req.params.id;
+  const { userId, lastReadMessageId } = req.body || {};
+  if (!userId) return res.status(400).json({ ok: false, error: 'userId required' });
+
+  const reads = readMap(clientId, channelId);
+  const at = new Date().toISOString();
+  reads.set(String(userId), { lastReadMessageId: lastReadMessageId || null, at });
+
+  emitTenant(clientId, 'chat:read', {
+    channelId,
+    userId: String(userId),
+    lastReadMessageId: lastReadMessageId || null,
+    at,
+  });
+
+  res.json({ ok: true });
+});
+/* --- end Internal Chat --- */
 
 // --- Tenants admin: phone → tenant mapping ---
 // GET list
@@ -402,12 +569,104 @@ app.post('/api/agent/estimate', express.json(), async (req, res) => {
   }
 });
 
+// --- Proposal cover letter (JS alias) ---
+app.post('/api/agent/proposal', async (req, res) => {
+  try {
+    const { items = [], notes = '', contact = {} } = req.body || {};
+
+    // Try LLM helper first (same one your /api/estimate/ai/summary uses)
+    let text = '';
+    try {
+      text = await draftEstimateCopy({ items, notes }, contact);
+    } catch (err) {
+      console.warn('[agent.proposal] draftEstimateCopy failed:', err?.message || err);
+    }
+
+    // Fallback: safe, no-LLM template
+    if (!text || !String(text).trim()) {
+      const lines = (Array.isArray(items) ? items : [])
+        .slice(0, 6)
+        .map((it) => {
+          const name = (it?.name || 'Item').toString();
+          const qty = Number(it?.qty) || 0;
+          const unit = (it?.unit || '').toString().trim();
+          const unitPrice = Number(it?.unitPrice) || 0;
+          const line = qty * unitPrice;
+          return `• ${name} — ${qty}${unit ? ' ' + unit : ''} @ $${unitPrice.toFixed(2)} (${line ? '$' + line.toFixed(2) : '—'})`;
+        })
+        .join('\n');
+
+      text =
+`Hi ${contact?.name || 'there'},
+
+Thanks for inviting us to look at your project. Below is a clear scope and transparent pricing.
+
+Scope summary:
+${lines || '• See line items below.'}
+
+${notes ? `Notes: ${String(notes).trim()}\n\n` : ''}If everything looks good, reply here or call us and we’ll get your work scheduled.
+
+Best regards,
+NONSTOP JOBS`;
+    }
+
+    return res.json({ ok: true, text });
+  } catch (e) {
+    console.error('[/api/agent/proposal]', e?.message || e);
+    return res.status(500).json({ ok: false, error: 'proposal_failed' });
+  }
+});
+
+
+
 // --- Events ---
 app.get('/api/events', (req, res) => {
   const clientId = (req.query.clientId || 'default').trim();
   const limit = Number(req.query.limit) || 100;
   const events = listEvents({ clientId, limit });
   res.json({ ok: true, events });
+});
+
+// --- Mark an invoice as paid (demo/dev) ---
+app.post('/api/invoices/:id/pay', async (req, res) => {
+  try {
+    const tenantId =
+      (req.body?.clientId || req.query?.clientId || req.tenantId || 'default').trim();
+
+    const inv = {
+      id: String(req.params.id),
+      total: Number(req.body?.total) || null,
+      contactId: req.body?.contactId || null,
+      appointmentId: req.body?.appointmentId || null,
+      at: new Date().toISOString(),
+    };
+
+    // Emit a domain event for this tenant so the UI (and automations) react.
+    try {
+      const ev = createEvent(
+        'invoice.paid',
+        tenantId,
+        {
+          invoiceId: inv.id,
+          total: inv.total,
+          contactId: inv.contactId,
+          appointmentId: inv.appointmentId,
+          at: inv.at,
+        },
+        { source: 'api', idempotencyKey: `invoice:${tenantId}:${inv.id}:paid` }
+      );
+
+      recordAndEmit(ioForTenant(tenantId), ev); // socket.io -> front-end listeners
+      await dispatchEvent(ev);                   // run any matching automations
+    } catch (e) {
+      // soft-fail: don’t break the API if broadcasting fails
+      console.warn('[invoice.paid] event dispatch warning:', e?.message || e);
+    }
+
+    res.json({ ok: true, invoice: inv });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.message || 'pay_failed' });
+  }
 });
 
 // ---- VEHICLES CRUD ----

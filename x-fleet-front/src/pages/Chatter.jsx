@@ -1,3 +1,4 @@
+// src/pages/Chatter.jsx
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { useEffect, useState, useMemo, useRef } from 'react'
 import { API_BASE } from '../config'
@@ -7,14 +8,17 @@ import { makeSocket, getTenantId, withTenant } from '../lib/socket'
 export default function Chatter() {
   const { contactId } = useParams()
   const navigate = useNavigate()
-  const bottomRef = useRef(null)
+
+  // Refs
   const inputRef = useRef(null)
+  const composerRef = useRef(null)
+  const listRef = useRef(null)      // 👈 scroll this container only
+  const bottomRef = useRef(null)    // kept, but no longer used to scroll the window
 
   // tenant (shared for sockets + HTTP)
   const tenantId = useMemo(() => getTenantId(), [])
 
   // Measure the composer so we can pad the message list accordingly
-  const composerRef = useRef(null)
   const [composerHeight, setComposerHeight] = useState(0)
   useEffect(() => {
     if (!composerRef.current) return
@@ -66,7 +70,7 @@ export default function Chatter() {
   // recordings bucket (local, event-driven)
   const REC_OPEN_KEY = 'chatter-rec-open'
   const [recOpen, setRecOpen] = useState(() => (localStorage.getItem(REC_OPEN_KEY) ?? '1') === '1')
-  const [recItems, setRecItems] = useState([]) // [{id, url, from, to, durationSec, at, status, recordingSid, callSid}]
+  const [recItems, setRecItems] = useState([])
 
   useEffect(() => {
     function onRec(e) {
@@ -180,7 +184,7 @@ export default function Chatter() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               contactId: effectiveId,
-              text: '(test) First message',
+              text: '(test) First message)',
               direction: 'outbound',
               clientId: tenantId,
             }),
@@ -236,30 +240,39 @@ export default function Chatter() {
     }
   }, [socket, effectiveId])
 
-  useEffect(() => {
-    return () => socket.close()
-  }, [socket])
+  useEffect(() => () => socket.close(), [socket])
 
-  // Auto-scroll message list (not the page)
+  // ✅ Auto-scroll the *list container*, never the window
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+    const el = listRef.current
+    if (!el) return
+    // only if content actually overflows (prevents fallback to window scroll)
+    if (el.scrollHeight > el.clientHeight + 2) {
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+    }
+  }, [messages, composerHeight])
 
-  useEffect(() => { if (effectiveId) inputRef.current?.focus() }, [effectiveId])
+  // ✅ Focus the SMS input without scrolling the page
+  useEffect(() => {
+    if (!effectiveId || !inputRef.current) return
+    try {
+      inputRef.current.focus({ preventScroll: true })
+    } catch {
+      inputRef.current.focus()
+    }
+  }, [effectiveId])
 
   // extract email subject/body from stored snippet when meta.subject missing
   function extractEmailParts(text = '', meta) {
     if (meta?.subject) return { subject: meta.subject, body: text || '' }
     let subject = ''
     let body = text || ''
-
     const emDash = body.indexOf(' — ')
     if (emDash > -1 && emDash < 140) {
       subject = body.slice(0, emDash).trim()
       body = body.slice(emDash + 3).trim()
       return { subject, body }
     }
-
     const nl = body.indexOf('\n')
     if (nl > -1 && nl < 140) {
       subject = body.slice(0, nl).trim()
@@ -268,10 +281,10 @@ export default function Chatter() {
     return { subject, body }
   }
 
-  // ---------- Per-contact AI state (fetch once / debounced) ----------
+  // ---------- Per-contact AI state ----------
   const lastFetchedPhoneRef = useRef('')
-  const lastFetchAtRef = useRef({}); // phone -> last fetch timestamp (ms)
-  const autopilotFetchInflight = useRef(false);
+  const lastFetchAtRef = useRef({})
+  const autopilotFetchInflight = useRef(false)
 
   const sanitizePhone = (p = '') => {
     const digits = String(p).replace(/\D/g, '')
@@ -281,36 +294,27 @@ export default function Chatter() {
   }
 
   const fetchAutopilotOnce = async (raw) => {
-    const phone = sanitizePhone(raw);
-    if (!phone || phone.length < 12) return;
-
-    // hard throttle: only 1 fetch per phone every 10s
-    const now = Date.now();
-    const last = lastFetchAtRef.current[phone] || 0;
-    if (now - last < 10_000) return;
-    lastFetchAtRef.current[phone] = now;
-
-    if (lastFetchedPhoneRef.current === phone) return;
-    if (autopilotFetchInflight.current) return;
-    autopilotFetchInflight.current = true;
-
-    lastFetchedPhoneRef.current = phone;
-
+    const phone = sanitizePhone(raw)
+    if (!phone || phone.length < 12) return
+    const now = Date.now()
+    const last = lastFetchAtRef.current[phone] || 0
+    if (now - last < 10_000) return
+    lastFetchAtRef.current[phone] = now
+    if (lastFetchedPhoneRef.current === phone) return
+    if (autopilotFetchInflight.current) return
+    autopilotFetchInflight.current = true
+    lastFetchedPhoneRef.current = phone
     try {
       const r = await fetch(
         `${API_BASE}/api/agent/state?phone=${encodeURIComponent(phone)}&clientId=${encodeURIComponent(tenantId)}`,
         withTenant()
-      );
-      const j = await r.json();
-      if (j?.ok) setAutopilot(!!j.state?.autopilot);
-    } catch {
-      // ignore
-    } finally {
-      autopilotFetchInflight.current = false;
-    }
-  };
+      )
+      const j = await r.json()
+      if (j?.ok) setAutopilot(!!j.state?.autopilot)
+    } catch {}
+    finally { autopilotFetchInflight.current = false }
+  }
 
-  // One-time fetch when the thread (effectiveId) changes.
   useEffect(() => {
     const phoneCandidate = idToPhone(effectiveId, to)
     fetchAutopilotOnce(phoneCandidate)
@@ -318,16 +322,16 @@ export default function Chatter() {
   }, [effectiveId])
 
   async function handleToggleAutopilot(next) {
-    if (next === autopilot) return;
-    setAutopilot(next);
-    const phone = idToPhone(effectiveId, to);
-    if (!phone) return;
+    if (next === autopilot) return
+    setAutopilot(next)
+    const phone = idToPhone(effectiveId, to)
+    if (!phone) return
     try {
       await fetch(`${API_BASE}/api/agent/autopilot`, withTenant({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone, enabled: next, clientId: tenantId }),
-      }));
+      }))
     } catch {}
   }
 
@@ -356,10 +360,9 @@ export default function Chatter() {
       const j = await r.json().catch(() => ({}))
       if (!r.ok || j?.ok === false) throw new Error(j?.error || 'Failed to send')
 
-      // Do not optimistically append; wait for socket echo.
       setText('')
       setError(null)
-      inputRef.current?.focus()
+      try { inputRef.current?.focus({ preventScroll: true }) } catch {}
     } catch (err) {
       setError(err.message || 'Send failed')
     } finally {
@@ -454,8 +457,10 @@ export default function Chatter() {
 
         {/* messages (bottom padding equals composer height) */}
         <div
-          className="flex-1 min-h-0 overflow-auto space-y-2 pr-1 border border-white/10 rounded-none p-2 bg-white/5"
+          ref={listRef}  // 👈 make this the scroll container we control
+          className="flex-1 min-h-0 overflow-auto overscroll-contain space-y-2 pr-1 border border-white/10 rounded-none p-2 bg-white/5"
           style={{ paddingBottom: composerHeight ? composerHeight + 12 : 12 }}
+          tabIndex={-1}
         >
           {loading && <div className="text-sm text-white/60">Loading…</div>}
           {error && <div className="text-sm text-red-400">{error}</div>}
@@ -495,34 +500,6 @@ export default function Chatter() {
               </div>
             )
           })}
-
-          {/* --- Recordings bucket (inline, collapsible) --- */}
-          <div className="mt-4 border-t border-white/10 pt-3">
-            <div className="flex items-center justify-between">
-              <div className="text-xs font-semibold uppercase tracking-wide text-white/70">
-                Recordings {recItems.length ? `(${recItems.length})` : ''}
-              </div>
-              <button
-                onClick={() => setRecOpen(v => !v)}
-                className="text-xs text-white/60 hover:text-white"
-              >
-                {recOpen ? 'Hide' : 'Show'}
-              </button>
-            </div>
-
-            {recOpen && (
-              <div className="mt-2 space-y-2">
-                {recItems.length === 0 && (
-                  <div className="text-xs text-white/50">
-                    When Twilio finishes a recording, it’ll show up here.
-                  </div>
-                )}
-                {recItems.map((r) => (
-                  <RecordingRow key={r.id} item={r} />
-                ))}
-              </div>
-            )}
-          </div>
 
           <div ref={bottomRef} />
         </div>

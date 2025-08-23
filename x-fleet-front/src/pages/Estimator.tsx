@@ -5,7 +5,7 @@ import { useNavigate, useLocation } from 'react-router-dom'
 import { API_BASE } from '../config'
 import { PACKS } from '../packs'
 import DispositionButton, { DispositionPayload } from '../components/DispositionButton'
-
+import { withTenant } from '../lib/socket'
 import * as turf from '@turf/turf'
 import type { Feature, Polygon, Position } from 'geojson'
 import L from 'leaflet'
@@ -429,6 +429,99 @@ export default function Estimator() {
   const [aiLoading, setAiLoading] = useState(false)
   const [showSmsTip, setShowSmsTip] = useState(false)
 
+  // NEW: deposit percentage and accept-intent
+  const [depositPct] = useState<number>(30)
+  const [acceptUrl, setAcceptUrl] = useState<string | null>(null)
+  const [creatingIntent, setCreatingIntent] = useState(false)
+
+  // Create or reuse a customer-facing accept link (intent)
+  async function ensureAcceptIntent(): Promise<string> {
+    if (acceptUrl) return acceptUrl
+    const pct = Math.max(1, Math.min(100, depositPct))
+    const contactId =
+      assignedContactId || (customer.name ? `manual:${customer.name}` : 'unknown')
+
+    const payload = {
+      contactId,
+      total: Math.round((items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unitPrice) || 0), 0) - Math.max(0, Number(discount) || 0)) * (1 + ((Number(taxRate) || 0) / 100)) * 100) / 100,
+      depositPct: pct,
+      items: items.map(it => ({
+        description: it.name,
+        quantity: it.qty,
+        unit: it.unit,
+        unitPrice: it.unitPrice,
+        notes: it.notes,
+      })),
+      notes,
+    }
+
+    setCreatingIntent(true)
+    try {
+      const r = await fetch(`${API_BASE}/api/estimates/intent`, {
+        method: 'POST',
+        ...withTenant({ headers: { 'Content-Type': 'application/json' } }),
+        body: JSON.stringify(payload),
+      })
+      const j = await r.json().catch(() => ({} as any))
+      if (!r.ok || j?.ok === false) throw new Error(j?.error || 'intent_failed')
+
+      // Prefer url from API; otherwise fall back to public route from id
+      const url =
+        j?.url ||
+        j?.link ||
+        `${window.location.origin}/public/estimate-intents/${encodeURIComponent(j?.id || j?.intentId || 'unknown')}`
+
+      setAcceptUrl(url)
+      return url
+    } catch (e: any) {
+      setError(e?.message || 'Failed to create accept link')
+      throw e
+    } finally {
+      setCreatingIntent(false)
+    }
+  }
+
+  // Create a deposit invoice immediately (used by ProposalPreview "Accept" button)
+  async function createDepositInvoice() {
+    try {
+      const pct = Math.max(1, Math.min(100, depositPct)) / 100
+      const amount = Math.round(totals.total * pct * 100) / 100
+      if (!amount || amount <= 0) {
+        setError('Total must be > 0 to create a deposit invoice.')
+        return
+      }
+
+      const contactId =
+        assignedContactId ||
+        (customer.name ? `manual:${customer.name}` : 'unknown')
+
+      const body = {
+        contactId,
+        items: [
+          {
+            description: `Deposit (${Math.round(pct * 100)}%) for estimate`,
+            quantity: 1,
+            unitPrice: amount,
+          },
+        ],
+        notes: `Auto-created from Estimator for ${customer.name || 'customer'}`,
+        status: 'open',
+      }
+
+      const r = await fetch(`${API_BASE}/api/invoices`, {
+        method: 'POST',
+        ...withTenant({ headers: { 'Content-Type': 'application/json' } }),
+        body: JSON.stringify(body),
+      })
+      const j = await r.json().catch(() => ({} as any))
+      if (!r.ok || j?.ok === false) throw new Error(j?.error || 'create_failed')
+
+      alert('Deposit invoice created.')
+    } catch (e: any) {
+      setError(e?.message || 'Failed to create invoice')
+    }
+  }
+
   // compute totals
   const totals: Totals = useMemo(() => {
     const subtotal = items.reduce((sum, it) => sum + (Number(it.qty) || 0) * (Number(it.unitPrice) || 0), 0)
@@ -507,7 +600,7 @@ export default function Estimator() {
   function updateItem(id: string, patch: Partial<LineItem>) { setItems(prev => prev.map(x => (x.id === id ? { ...x, ...patch } : x))) }
 
   /* ---------- Estimate text & actions ---------- */
-  function buildEstimateText(): string {
+  function buildEstimateText(extra?: { acceptUrl?: string }): string {
     const lines: string[] = []
     lines.push(`Estimate for ${customer.name || 'Customer'}`)
     if (customer.address) lines.push(customer.address)
@@ -526,12 +619,16 @@ export default function Estimator() {
     lines.push(`Tax (${taxRate}%): ${currency(totals.tax)}`)
     lines.push(`Total: ${currency(totals.total)}`)
     if (notes) { lines.push('— — —'); lines.push(notes) }
+    if (extra?.acceptUrl) {
+      lines.push('— — —')
+      lines.push(`Accept & Sign: ${extra.acceptUrl}`)
+    }
     return lines.join('\n')
   }
 
   async function handleCopyEstimate() {
     try {
-      await navigator.clipboard.writeText(buildEstimateText())
+      await navigator.clipboard.writeText(buildEstimateText(acceptUrl ? { acceptUrl } : undefined))
       setCopied(true)
       setTimeout(() => setCopied(false), 1200)
     } catch { setError('Copy failed') }
@@ -541,8 +638,11 @@ export default function Estimator() {
     setError(null)
     const toPhone = normalizePhone(customer.phone)
     if (!toPhone) { setError('Enter a valid customer phone first.'); return }
-    const text = buildEstimateText()
     try {
+      // Ensure accept link exists and append to SMS
+      const link = await ensureAcceptIntent()
+      const text = buildEstimateText({ acceptUrl: link })
+
       setSending(true)
       const r = await fetch(`${API_BASE}/api/mock/ghl/send-message`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -551,7 +651,11 @@ export default function Estimator() {
       const j = await r.json().catch(() => ({}))
       if (!r.ok || (j as any)?.ok === false) throw new Error((j as any)?.error || 'Failed to send SMS')
       navigate(`/chatter/${encodeURIComponent(assignedContactId || `manual:${toPhone}`)}`)
-    } catch (e: any) { setError(e?.message || 'Failed to send SMS') } finally { setSending(false) }
+    } catch (e: any) {
+      setError(e?.message || 'Failed to send SMS')
+    } finally {
+      setSending(false)
+    }
   }
 
   async function handleAiAssist() {
@@ -572,17 +676,26 @@ export default function Estimator() {
     } catch (e: any) { setError(e?.message || 'AI Assist failed') } finally { setAiLoading(false) }
   }
 
+  // 🔁 NEW: structured cover-letter generation
   async function generateCoverLetter() {
     setCoverLoading(true)
     try {
-      const lines = items.map(it => `${it.name} — ${it.qty} ${it.unit} @ ${currency(it.unitPrice)}${it.notes ? ` (${it.notes})` : ''}`).join('\n')
-      const prompt = `Write a friendly, professional proposal cover letter for a home services estimate.\nCustomer: ${customer.name || 'Customer'}\n${customer.address ? `Address: ${customer.address}\n` : ''}Scope summary (line items):\n${lines}\n\n${notes ? `Notes/terms: ${notes}\n` : ''}Tone: concise, trustworthy, no hard sell. 120-180 words. Include a brief next-step CTA.`
-      const r = await fetch(`${API_BASE}/api/agent/proposal`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt }) })
-      if (r.ok) {
-        const j = await r.json().catch(() => ({}))
-        const t = (j?.text && String(j.text)) || ''
-        if (t) { setCoverLetter(t); return }
-      }
+      const r = await fetch(`${API_BASE}/api/agent/proposal`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tone: 'friendly',
+          customer,
+          notes,
+          items: items.map(it => ({
+            name: it.name, qty: it.qty, unit: it.unit, unitPrice: it.unitPrice, notes: it.notes || ''
+          })),
+        }),
+      })
+      const j = await r.json().catch(() => ({}))
+      const t = (j?.text && String(j.text)) || ''
+      if (t) { setCoverLetter(t); return }
+      // graceful fallback
       setCoverLetter(`Hi ${customer.name || 'there'},\n\nThanks for inviting us to look at your project. We’ve outlined a clear scope and transparent pricing below. Our licensed team will complete the work safely and efficiently, and we’ll keep you updated at each step.\n\nPlease review the estimate and let us know if you’d like any adjustments. If everything looks good, reply here or call us to pick a start date.\n\nBest regards,\nNONSTOP JOBS`)
     } catch {
       setCoverLetter(`Thank you for the opportunity. The following proposal outlines our recommended scope and pricing. Please let us know if you have any questions or would like to schedule.`)
@@ -595,230 +708,265 @@ export default function Estimator() {
 
   // ---------- CONTENT ONLY (AppShell provides TopBar/StatBar/SideNav) ----------
   return (
-    <div className="glass rounded-none p-3 md:p-4 flex flex-col gap-3 min-h-[70vh]">
-      {/* Sticky header / tabs */}
-      <div className="-mx-3 md:-mx-4 px-3 md:px-4 py-2 sticky top-0 z-10 border-b border-white/10 bg-neutral-900/85 backdrop-blur supports-[backdrop-filter]:bg-neutral-900/60">
-        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 md:gap-3">
-          <div className="flex items-center gap-2">
-            
-            <div className="hidden md:block h-5 w-px bg-white/10" />
-            <div className="bg-white/5 border border-white/10 rounded-full p-0.5">
-              <button className={['px-3 py-1.5 text-sm rounded-full', tab === 'estimate' ? 'bg-white/10' : 'hover:bg-white/5'].join(' ')} onClick={() => setTab('estimate')}>Estimate</button>
-              <button className={['px-3 py-1.5 text-sm rounded-full', tab === 'measure' ? 'bg-white/10' : 'hover:bg-white/5'].join(' ')} onClick={() => setTab('measure')}>Measure</button>
-            </div>
-          </div>
-
-          {tab === 'estimate' && (
-            <div className="relative flex flex-wrap items-center gap-2 md:gap-3">
-              <button
-                className="inline-flex items-center gap-2 md:px-4 md:py-2 px-3 py-1.5 text-sm rounded-none bg-sky-600 hover:bg-sky-500 active:bg-sky-700 text-white border border-sky-400/30 disabled:opacity-60 disabled:cursor-not-allowed"
-                onClick={handleSendSMS}
-                onMouseEnter={() => !canSend && setShowSmsTip(true)}
-                onMouseLeave={() => setShowSmsTip(false)}
-                onFocus={() => !canSend && setShowSmsTip(true)}
-                onBlur={() => setShowSmsTip(false)}
-                disabled={sending || !canSend}
-                aria-busy={sending}
-                title={canSend ? 'Send estimate via SMS' : 'Add a valid phone and at least one item'}
-              >
-                {sending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
-                {sending ? 'Sending…' : 'Send via SMS'}
-              </button>
-
-              <DispositionButton
-                contactId={assignedContactId || customer.name || 'unknown'}
-                onDispo={async (p: DispositionPayload) => {
-                  await fetch(`${API_BASE}/api/dispositions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(p) })
-                  await fetch(`${API_BASE}/api/agent/followup`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(p) })
-                }}
-              />
-
-              {!canSend && showSmsTip && (
-                <div role="tooltip" className="absolute top-full mt-1 left-0 text-[11px] bg-black/80 border border-white/10 px-2 py-1 rounded-none">
-                  Add at least one item and a valid phone to enable SMS.
-                </div>
-              )}
-
-              <div className="hidden md:block h-6 w-px bg-white/10" />
-
-              <button type="button" onClick={handleCopyEstimate} className="inline-flex items-center gap-2 md:px-4 md:py-2 px-3 py-1.5 text-sm rounded-none border border-white/15 bg-white/5 hover:bg-white/10 disabled:opacity-60" title="Copy estimate text to clipboard" disabled={items.length === 0}>
-                <CopyIcon size={16} /> {copied ? 'Copied!' : 'Copy'}
-              </button>
-
-              <button
-                type="button"
-                onClick={async () => { setShowPreview(true); if (!coverLetter) await generateCoverLetter() }}
-                className="inline-flex items-center gap-2 md:px-4 md:py-2 px-3 py-1.5 text-sm rounded-none border border-white/15 bg-white/5 hover:bg-white/10 disabled:opacity-60"
-                title="See print-ready proposal with AI cover letter"
-                disabled={items.length === 0}
-              >
-                <Eye size={16} /> Preview Proposal
-              </button>
-
-              {!canSend && <div className="basis-full md:hidden text-xs text-white/55">Add at least one item and a valid phone to enable SMS.</div>}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {tab === 'measure' ? (
-        <RoofMeasurePanel
-          onUse={(list, note) => {
-            setItems(list.map(it => ({ id: uid(), ...it })))
-            setNotes(note)
-            setTab('estimate')
-          }}
-        />
-      ) : (
-        <>
-          {/* Assign to contact + Sender */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-            <div className="md:col-span-2">
-              <div className="text-xs font-semibold tracking-wide mb-1">ASSIGN TO CONTACT</div>
-              <SearchableSelect<Contact>
-                value={assignedContactId ? { id: assignedContactId, name: customer.name } : null}
-                onSelect={onSelectContact}
-                onSearch={setContactQuery}
-                options={contactOptions}
-                placeholder="Search by name or phone…"
-                loading={contactsLoading}
-                allowCreateLabel="Create contact “%s”"
-              />
-              {assignedContactId ? (
-                <ContactChip name={customer.name} phone={customer.phone} email={customer.email} onClear={clearContact} />
-              ) : (
-                <div className="text-xs text-white/60 mt-1">Select a contact to auto-fill details.</div>
-              )}
-            </div>
-
-            <div>
-              <div className="text-xs font-semibold tracking-wide mb-1">SENDER (USER)</div>
-              <SearchableSelect<User>
-                value={senderId ? userOptions.find(u => u.id === senderId) || null : null}
-                onSelect={u => setSenderId(u.id)}
-                onSearch={() => {}}
-                options={userOptions}
-                placeholder="Choose user…"
-                loading={usersLoading}
-              />
-              {senderId && (
-                <div className="mt-1 text-xs text-white/60">
-                  From: <span className="text-white/80">{userOptions.find(u => u.id === senderId)?.name}</span>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Customer details */}
-          <div className="border border-white/10 bg-white/[0.035] mt-2">
-            <button type="button" onClick={() => setOpenDetails(o => !o)} className="w-full flex items-center justify-between px-3 py-2 text-sm">
-              <span>Customer details</span>
-              <span className="text-white/60">{openDetails ? '▴' : '▾'}</span>
+    <div className="flex flex-col gap-3 min-h-[70vh]">
+      {/* === Toolbar above the panel (moved out) === */}
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 md:gap-3">
+        <div className="flex items-center gap-2">
+          <div className="bg-white/5 border border-white/10 rounded-full p-0.5">
+            <button
+              className={['px-3 py-1.5 text-sm rounded-full', tab === 'estimate' ? 'bg-white/10' : 'hover:bg-white/5'].join(' ')}
+              onClick={() => setTab('estimate')}
+            >
+              Estimate
             </button>
-            {openDetails && (
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-2 px-3 pb-3">
-                <input value={customer.name} onChange={e => setCustomer({ ...customer, name: e.target.value })} placeholder="Customer name" className="bg-black/30 border border-white/10 rounded-none px-2 py-2 text-sm outline-none focus:border-white/30" readOnly={!assignedContactId} />
-                <div className="relative">
-                  <input value={customer.phone} onChange={e => setCustomer({ ...customer, phone: e.target.value })} placeholder="Customer phone (+1 555 555 0123)" className="w-full bg-black/30 border border-white/10 rounded-none px-2 py-2 text-sm outline-none focus:border-white/30" readOnly={!assignedContactId} />
-                  {!assignedContactId && <span className="absolute right-2 top-2 text-white/40">🔒</span>}
-                </div>
-                <input value={customer.email} onChange={e => setCustomer({ ...customer, email: e.target.value })} placeholder="Email (optional)" className="bg-black/30 border border-white/10 rounded-none px-2 py-2 text-sm outline-none focus:border-white/30" readOnly={!assignedContactId} />
-                <input value={customer.address} onChange={e => setCustomer({ ...customer, address: e.target.value })} placeholder="Address (optional)" className="bg-black/30 border border-white/10 rounded-none px-2 py-2 text-sm outline-none focus:border-white/30" readOnly={!assignedContactId} />
-                {!phoneValid && (customer.phone?.length > 0 || assignedContactId) && (
-                  <div className="md:col-span-4 text-xs text-red-400">Please enter a valid phone number (E.164).</div>
-                )}
+            <button
+              className={['px-3 py-1.5 text-sm rounded-full', tab === 'measure' ? 'bg-white/10' : 'hover:bg-white/5'].join(' ')}
+              onClick={() => setTab('measure')}
+            >
+              Measure
+            </button>
+          </div>
+        </div>
+
+        {tab === 'estimate' && (
+          <div className="relative flex flex-wrap items-center gap-2 md:gap-3">
+            <button
+              className="inline-flex items-center gap-2 md:px-4 md:py-2 px-3 py-1.5 text-sm rounded-none bg-sky-600 hover:bg-sky-500 active:bg-sky-700 text-white border border-sky-400/30 disabled:opacity-60 disabled:cursor-not-allowed"
+              onClick={handleSendSMS}
+              onMouseEnter={() => !canSend && setShowSmsTip(true)}
+              onMouseLeave={() => setShowSmsTip(false)}
+              onFocus={() => !canSend && setShowSmsTip(true)}
+              onBlur={() => setShowSmsTip(false)}
+              disabled={sending || !canSend}
+              aria-busy={sending}
+              title={canSend ? 'Send estimate via SMS' : 'Add a valid phone and at least one item'}
+            >
+              {sending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
+              {sending ? 'Sending…' : 'Send via SMS'}
+            </button>
+
+            <DispositionButton
+              contactId={assignedContactId || customer.name || 'unknown'}
+              onDispo={async (p: DispositionPayload) => {
+                await fetch(`${API_BASE}/api/dispositions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(p) })
+                await fetch(`${API_BASE}/api/agent/followup`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(p) })
+              }}
+            />
+
+            {!canSend && showSmsTip && (
+              <div role="tooltip" className="absolute top-full mt-1 left-0 text-[11px] bg-black/80 border border-white/10 px-2 py-1 rounded-none">
+                Add at least one item and a valid phone to enable SMS.
               </div>
             )}
-          </div>
 
-          {/* Quick add */}
-          <div className="flex flex-wrap gap-2 mb-2 mt-2">
-            {[
-              { name: 'Labor', qty: 1, unit: 'hr', unitPrice: 125, notes: '' },
-              { name: 'Materials', qty: 1, unit: 'ea', unitPrice: 250, notes: 'Allowance' },
-              { name: 'Disposal', qty: 1, unit: 'ea', unitPrice: 75, notes: 'Debris removal' },
-              { name: 'Permit', qty: 1, unit: 'ea', unitPrice: 60, notes: '' },
-            ].map(t => (
-              <button key={t.name} onClick={() => addFromTemplate(t)} className="px-2 py-1 text-xs rounded-none glass hover:bg-white/10" title={`${t.qty} ${t.unit} @ ${currency(t.unitPrice)}`}>
-                + {t.name}
-              </button>
-            ))}
-          </div>
+            <div className="hidden md:block h-6 w-px bg-white/10" />
 
-          {/* Items */}
-          <div className="border border-white/10 rounded-none">
-            <div className="grid grid-cols-12 gap-2 p-2 bg-white/5 text-xs text-white/70">
-              <div className="col-span-4">Item</div>
-              <div className="col-span-2">Qty</div>
-              <div className="col-span-2">Unit</div>
-              <div className="col-span-2">Unit Price</div>
-              <div className="col-span-1 text-right">Line</div>
-              <div className="col-span-1"></div>
+            <button
+              type="button"
+              onClick={handleCopyEstimate}
+              className="inline-flex items-center gap-2 md:px-4 md:py-2 px-3 py-1.5 text-sm rounded-none border border-white/15 bg-white/5 hover:bg-white/10 disabled:opacity-60"
+              title="Copy estimate text to clipboard"
+              disabled={items.length === 0}
+            >
+              <CopyIcon size={16} /> {copied ? 'Copied!' : 'Copy'}
+            </button>
+
+            <button
+              type="button"
+              onClick={async () => { setShowPreview(true); if (!coverLetter) await generateCoverLetter() }}
+              className="inline-flex items-center gap-2 md:px-4 md:py-2 px-3 py-1.5 text-sm rounded-none border border-white/15 bg-white/5 hover:bg-white/10 disabled:opacity-60"
+              title="See print-ready proposal with AI cover letter"
+              disabled={items.length === 0}
+            >
+              <Eye size={16} /> Preview Proposal
+            </button>
+
+            {/* NEW: Create/Copy Accept link */}
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  const link = await ensureAcceptIntent()
+                  await navigator.clipboard.writeText(link)
+                  setCopied(true)
+                  setTimeout(() => setCopied(false), 1200)
+                } catch { /* error set in ensureAcceptIntent */ }
+              }}
+              className="inline-flex items-center gap-2 md:px-4 md:py-2 px-3 py-1.5 text-sm rounded-none bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white border border-emerald-400/30 disabled:opacity-60"
+              disabled={items.length === 0 || totals.total <= 0 || creatingIntent}
+              title="Generate a customer-facing accept link and copy it"
+            >
+              {creatingIntent ? <Loader2 size={16} className="animate-spin" /> : null}
+              {acceptUrl ? 'Copy Accept Link' : `Create Accept Link (${depositPct}% deposit)`}
+            </button>
+
+            {!canSend && <div className="basis-full md:hidden text-xs text-white/55">Add at least one item and a valid phone to enable SMS.</div>}
+          </div>
+        )}
+      </div>
+      {/* === End toolbar === */}
+
+      {/* === Panel with page content (no toolbar inside) === */}
+      <div className="glass rounded-none p-3 md:p-4 flex flex-col gap-3 flex-1">
+        {tab === 'measure' ? (
+          <RoofMeasurePanel
+            onUse={(list, note) => {
+              setItems(list.map(it => ({ id: uid(), ...it })))
+              setNotes(note)
+              setTab('estimate')
+            }}
+          />
+        ) : (
+          <>
+            {/* Assign to contact + Sender */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+              <div className="md:col-span-2">
+                <div className="text-xs font-semibold tracking-wide mb-1">ASSIGN TO CONTACT</div>
+                <SearchableSelect<Contact>
+                  value={assignedContactId ? { id: assignedContactId, name: customer.name } : null}
+                  onSelect={onSelectContact}
+                  onSearch={setContactQuery}
+                  options={contactOptions}
+                  placeholder="Search by name or phone…"
+                  loading={contactsLoading}
+                  allowCreateLabel="Create contact “%s”"
+                />
+                {assignedContactId ? (
+                  <ContactChip name={customer.name} phone={customer.phone} email={customer.email} onClear={clearContact} />
+                ) : (
+                  <div className="text-xs text-white/60 mt-1">Select a contact to auto-fill details.</div>
+                )}
+              </div>
+
+              <div>
+                <div className="text-xs font-semibold tracking-wide mb-1">SENDER (USER)</div>
+                <SearchableSelect<User>
+                  value={senderId ? userOptions.find(u => u.id === senderId) || null : null}
+                  onSelect={u => setSenderId(u.id)}
+                  onSearch={() => {}}
+                  options={userOptions}
+                  placeholder="Choose user…"
+                  loading={usersLoading}
+                />
+                {senderId && (
+                  <div className="mt-1 text-xs text-white/60">
+                    From: <span className="text-white/80">{userOptions.find(u => u.id === senderId)?.name}</span>
+                  </div>
+                )}
+              </div>
             </div>
 
-            {items.map(it => {
-              const line = (Number(it.qty) || 0) * (Number(it.unitPrice) || 0)
-              return (
-                <div key={it.id} className="grid grid-cols-12 gap-2 p-2 border-t border-white/10">
-                  <div className="col-span-4">
-                    <input value={it.name} onChange={e => updateItem(it.id, { name: e.target.value })} placeholder="Description" className="w-full bg-black/30 border border-white/10 rounded-none px-2 py-1 text-sm outline-none focus:border-white/30" />
-                    <input value={it.notes || ''} onChange={e => updateItem(it.id, { notes: e.target.value })} placeholder="Notes (optional)" className="mt-1 w-full bg-black/20 border border-white/10 rounded-none px-2 py-1 text-xs outline-none focus:border-white/30" />
+            {/* Customer details */}
+            <div className="border border-white/10 bg-white/[0.035] mt-2">
+              <button type="button" onClick={() => setOpenDetails(o => !o)} className="w-full flex items-center justify-between px-3 py-2 text-sm">
+                <span>Customer details</span>
+                <span className="text-white/60">{openDetails ? '▴' : '▾'}</span>
+              </button>
+              {openDetails && (
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-2 px-3 pb-3">
+                  <input value={customer.name} onChange={e => setCustomer({ ...customer, name: e.target.value })} placeholder="Customer name" className="bg-black/30 border border-white/10 rounded-none px-2 py-2 text-sm outline-none focus:border-white/30" readOnly={!assignedContactId} />
+                  <div className="relative">
+                    <input value={customer.phone} onChange={e => setCustomer({ ...customer, phone: e.target.value })} placeholder="Customer phone (+1 555 555 0123)" className="w-full bg-black/30 border border-white/10 rounded-none px-2 py-2 text-sm outline-none focus:border-white/30" readOnly={!assignedContactId} />
+                    {!assignedContactId && <span className="absolute right-2 top-2 text-white/40">🔒</span>}
                   </div>
-                  <div className="col-span-2">
-                    <input type="number" min={0} step="0.01" value={it.qty} onChange={e => updateItem(it.id, { qty: Number(e.target.value) })} className="w-full bg-black/30 border border-white/10 rounded-none px-2 py-1 text-sm outline-none focus:border-white/30" />
-                  </div>
-                  <div className="col-span-2">
-                    <input value={it.unit} onChange={e => updateItem(it.id, { unit: e.target.value })} placeholder="hr, sq, ea…" className="w-full bg-black/30 border border-white/10 rounded-none px-2 py-1 text-sm outline-none focus:border-white/30" />
-                  </div>
-                  <div className="col-span-2">
-                    <input type="number" min={0} step="0.01" value={it.unitPrice} onChange={e => updateItem(it.id, { unitPrice: Number(e.target.value) })} className="w-full bg-black/30 border border-white/10 rounded-none px-2 py-1 text-sm outline-none focus:border-white/30" />
-                  </div>
-                  <div className="col-span-1 text-right pt-2 text-sm">{currency(line)}</div>
-                  <div className="col-span-1 flex items-center justify-end">
-                    <button className="px-2 py-1 text-xs rounded-none glass" onClick={() => removeItem(it.id)}>Remove</button>
-                  </div>
+                  <input value={customer.email} onChange={e => setCustomer({ ...customer, email: e.target.value })} placeholder="Email (optional)" className="bg-black/30 border border-white/10 rounded-none px-2 py-2 text-sm outline-none focus:border-white/30" readOnly={!assignedContactId} />
+                  <input value={customer.address} onChange={e => setCustomer({ ...customer, address: e.target.value })} placeholder="Address (optional)" className="bg-black/30 border border-white/10 rounded-none px-2 py-2 text-sm outline-none focus:border-white/30" readOnly={!assignedContactId} />
+                  {!phoneValid && (customer.phone?.length > 0 || assignedContactId) && (
+                    <div className="md:col-span-4 text-xs text-red-400">Please enter a valid phone number (E.164).</div>
+                  )}
                 </div>
-              )
-            })}
-
-            <div className="p-2 border-t border-white/10">
-              <button className="px-3 py-1.5 text-sm rounded-none glass" onClick={addItem}>+ Add item</button>
+              )}
             </div>
-          </div>
 
-          {/* Totals */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            <div className="md:col-span-2">
-              <textarea value={notes} onChange={e => setNotes(e.target.value)} placeholder="Notes / terms" rows={4} className="w-full bg-black/30 border border-white/10 rounded-none px-2 py-2 text-sm outline-none focus:border-white/30" />
+            {/* Quick add */}
+            <div className="flex flex-wrap gap-2 mb-2 mt-2">
+              {[
+                { name: 'Labor', qty: 1, unit: 'hr', unitPrice: 125, notes: '' },
+                { name: 'Materials', qty: 1, unit: 'ea', unitPrice: 250, notes: 'Allowance' },
+                { name: 'Disposal', qty: 1, unit: 'ea', unitPrice: 75, notes: 'Debris removal' },
+                { name: 'Permit', qty: 1, unit: 'ea', unitPrice: 60, notes: '' },
+              ].map(t => (
+                <button key={t.name} onClick={() => addFromTemplate(t)} className="px-2 py-1 text-xs rounded-none glass hover:bg-white/10" title={`${t.qty} ${t.unit} @ ${currency(t.unitPrice)}`}>
+                  + {t.name}
+                </button>
+              ))}
             </div>
-            <div className="md:col-span-1 border border-white/10 rounded-none p-2 bg-white/5 sticky top-3 self-start">
-              <div className="flex items-center justify-between text-sm"><span>Subtotal</span><span>{currency(totals.subtotal)}</span></div>
-              <div className="flex items-center justify-between gap-2 mt-2 text-sm">
-                <label className="opacity-80">Discount ($)</label>
-                <input type="number" min={0} step="0.01" value={discount} onChange={e => setDiscount(Number(e.target.value))} className="w-24 bg-black/30 border border-white/10 rounded-none px-2 py-1 text-sm text-right outline-none focus:border-white/30" />
+
+            {/* Items */}
+            <div className="border border-white/10 rounded-none">
+              <div className="grid grid-cols-12 gap-2 p-2 bg-white/5 text-xs text-white/70">
+                <div className="col-span-4">Item</div>
+                <div className="col-span-2">Qty</div>
+                <div className="col-span-2">Unit</div>
+                <div className="col-span-2">Unit Price</div>
+                <div className="col-span-1 text-right">Line</div>
+                <div className="col-span-1"></div>
               </div>
-              <div className="flex items-center justify-between gap-2 mt-2 text-sm">
-                <label className="opacity-80">Tax rate (%)</label>
-                <input type="number" min={0} step="0.01" value={taxRate} onChange={e => setTaxRate(Number(e.target.value))} className="w-24 bg-black/30 border border-white/10 rounded-none px-2 py-1 text-sm text-right outline-none focus:border-white/30" />
-              </div>
-              <div className="h-px bg-white/10 my-3" />
-              <div className="flex items-center justify-between text-base font-semibold"><span>Total</span><span>{currency(totals.total)}</span></div>
-            </div>
-          </div>
 
-          {/* AI Assist */}
-          <div className="border border-white/10 rounded-none p-2 bg-neutral-900">
-            <div className="text-sm font-semibold mb-2">AI Assist (beta)</div>
-            <textarea value={aiPrompt} onChange={e => setAiPrompt(e.target.value)} rows={3} className="w-full bg-black/30 border border-white/10 rounded-none px-2 py-2 text-sm outline-none focus:border-white/30" />
-            <div className="mt-2 flex items-center gap-2">
-              <button className="px-3 py-1.5 text-sm rounded-none bg-sky-600 hover:bg-sky-500 active:bg-sky-700 text-white border border-sky-400/30 disabled:opacity-60 disabled:cursor-not-allowed" onClick={handleAiAssist} disabled={aiLoading}>
-                {aiLoading ? 'Thinking…' : 'AI-Powered Calculation'}
-              </button>
-              {error && <div className="text-sm text-red-400">{error}</div>}
+              {items.map(it => {
+                const line = (Number(it.qty) || 0) * (Number(it.unitPrice) || 0)
+                return (
+                  <div key={it.id} className="grid grid-cols-12 gap-2 p-2 border-t border-white/10">
+                    <div className="col-span-4">
+                      <input value={it.name} onChange={e => updateItem(it.id, { name: e.target.value })} placeholder="Description" className="w-full bg-black/30 border border-white/10 rounded-none px-2 py-1 text-sm outline-none focus:border-white/30" />
+                      <input value={it.notes || ''} onChange={e => updateItem(it.id, { notes: e.target.value })} placeholder="Notes (optional)" className="mt-1 w-full bg-black/20 border border-white/10 rounded-none px-2 py-1 text-xs outline-none focus:border-white/30" />
+                    </div>
+                    <div className="col-span-2">
+                      <input type="number" min={0} step="0.01" value={it.qty} onChange={e => updateItem(it.id, { qty: Number(e.target.value) })} className="w-full bg-black/30 border border-white/10 rounded-none px-2 py-1 text-sm outline-none focus:border-white/30" />
+                    </div>
+                    <div className="col-span-2">
+                      <input value={it.unit} onChange={e => updateItem(it.id, { unit: e.target.value })} placeholder="hr, sq, ea…" className="w-full bg-black/30 border border-white/10 rounded-none px-2 py-1 text-sm outline-none focus:border-white/30" />
+                    </div>
+                    <div className="col-span-2">
+                      <input type="number" min={0} step="0.01" value={it.unitPrice} onChange={e => updateItem(it.id, { unitPrice: Number(e.target.value) })} className="w-full bg-black/30 border border-white/10 rounded-none px-2 py-1 text-sm outline-none focus:border-white/30" />
+                    </div>
+                    <div className="col-span-1 text-right pt-2 text-sm">{currency(line)}</div>
+                    <div className="col-span-1 flex items-center justify-end">
+                      <button className="px-2 py-1 text-xs rounded-none glass" onClick={() => removeItem(it.id)}>Remove</button>
+                    </div>
+                  </div>
+                )
+              })}
+
+              <div className="p-2 border-t border-white/10">
+                <button className="px-3 py-1.5 text-sm rounded-none glass" onClick={addItem}>+ Add item</button>
+              </div>
             </div>
-          </div>
-        </>
-      )}
+
+            {/* Totals */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="md:col-span-2">
+                <textarea value={notes} onChange={e => setNotes(e.target.value)} placeholder="Notes / terms" rows={4} className="w-full bg-black/30 border border-white/10 rounded-none px-2 py-2 text-sm outline-none focus:border-white/30" />
+              </div>
+              <div className="md:col-span-1 border border-white/10 rounded-none p-2 bg-white/5 sticky top-3 self-start">
+                <div className="flex items-center justify-between text-sm"><span>Subtotal</span><span>{currency(totals.subtotal)}</span></div>
+                <div className="flex items-center justify-between gap-2 mt-2 text-sm">
+                  <label className="opacity-80">Discount ($)</label>
+                  <input type="number" min={0} step="0.01" value={discount} onChange={e => setDiscount(Number(e.target.value))} className="w-24 bg-black/30 border border-white/10 rounded-none px-2 py-1 text-sm text-right outline-none focus:border-white/30" />
+                </div>
+                <div className="flex items-center justify-between gap-2 mt-2 text-sm">
+                  <label className="opacity-80">Tax rate (%)</label>
+                  <input type="number" min={0} step="0.01" value={taxRate} onChange={e => setTaxRate(Number(e.target.value))} className="w-24 bg-black/30 border border-white/10 rounded-none px-2 py-1 text-sm text-right outline-none focus:border-white/30" />
+                </div>
+                <div className="h-px bg-white/10 my-3" />
+                <div className="flex items-center justify-between text-base font-semibold"><span>Total</span><span>{currency(totals.total)}</span></div>
+              </div>
+            </div>
+
+            {/* AI Assist */}
+            <div className="border border-white/10 rounded-none p-2 bg-neutral-900">
+              <div className="text-sm font-semibold mb-2">AI Assist (beta)</div>
+              <textarea value={aiPrompt} onChange={e => setAiPrompt(e.target.value)} rows={3} className="w-full bg-black/30 border border-white/10 rounded-none px-2 py-2 text-sm outline-none focus:border-white/30" />
+              <div className="mt-2 flex items-center gap-2">
+                <button className="px-3 py-1.5 text-sm rounded-none bg-sky-600 hover:bg-sky-500 active:bg-sky-700 text-white border border-sky-400/30 disabled:opacity-60 disabled:cursor-not-allowed" onClick={handleAiAssist} disabled={aiLoading}>
+                  {aiLoading ? 'Thinking…' : 'AI-Powered Calculation'}
+                </button>
+                {error && <div className="text-sm text-red-400">{error}</div>}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
 
       {/* Proposal Preview Side Panel */}
       <ProposalPreview
@@ -834,6 +982,9 @@ export default function Estimator() {
         onRegenerate={generateCoverLetter}
         generating={coverLoading}
         sender={{ name: selectedSender?.name, title: 'Project Manager', phone: selectedSender?.phone, email: selectedSender?.email }}
+        depositPct={30}
+        showDepositCta
+        onAcceptDeposit={createDepositInvoice}
       />
     </div>
   )

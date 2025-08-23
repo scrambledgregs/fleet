@@ -8,6 +8,7 @@
 import axios from 'axios';
 import { sendSMS } from './twilio.js';
 import { sendEmail } from './mailgun';
+import { BaseEvent } from './events'
 
 // ---------- Types (lightweight) ----------
 export type EventEnvelope = {
@@ -104,6 +105,19 @@ function renderTemplate(input: string, ev: EventEnvelope) {
     .replace(/\{event\.name\}/g, ev.name);
 }
 
+type AnyEventEnvelope = EventEnvelope | BaseEvent<any>;
+
+function toEnvelope(ev: AnyEventEnvelope): EventEnvelope {
+  return {
+    id: ev.id,
+    name: ev.name,
+    clientId: (ev as any).clientId ?? null,
+    payload: (ev as any).payload ?? {},
+    meta: (ev as any).meta,
+    at: (ev as any).at ?? (ev as any).ts ?? new Date().toISOString(),
+  };
+}
+
 async function runAction(a: Action, ev: EventEnvelope) {
   if (a.kind === 'webhook') {
     const method = a.method || 'POST';
@@ -172,15 +186,17 @@ export function deleteAutomation(clientId: string, id: string) {
   return getBag(clientId).delete(id);
 }
 
-export async function dispatchEvent(ev: EventEnvelope) {
-  const bag = ev.clientId ? getBag(ev.clientId) : null;
+export async function dispatchEvent(ev: AnyEventEnvelope) {
+  const env = toEnvelope(ev);
+
+  const bag = env.clientId ? getBag(env.clientId) : null;
   const candidates: Automation[] = [];
 
   if (bag) {
     for (const a of bag.values()) {
       if (!a.enabled) continue;
-      if (!matchesEventName(a.trigger.event, ev.name)) continue;
-      if (!allFiltersMatch(a.trigger.filters, ev.payload)) continue;
+      if (!matchesEventName(a.trigger.event, env.name)) continue;
+      if (!allFiltersMatch(a.trigger.filters, env.payload)) continue;
       candidates.push(a);
     }
   }
@@ -189,7 +205,7 @@ export async function dispatchEvent(ev: EventEnvelope) {
   for (const auto of candidates) {
     for (const action of auto.actions) {
       try {
-        const r = await runAction(action, ev);
+        const r = await runAction(action, env);
         results.push({ automationId: auto.id, action: action.kind, ok: r.ok !== false, error: r.error || null });
       } catch (e: any) {
         results.push({ automationId: auto.id, action: action.kind, ok: false, error: e?.message || String(e) });

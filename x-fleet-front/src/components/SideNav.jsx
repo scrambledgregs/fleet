@@ -5,23 +5,7 @@ import {
   FileText, MessageSquare, Activity, Bot, Settings
 } from 'lucide-react'
 
-// Order: Dashboard, Jobs (Bookings), Contacts, Calendar, Estimator, Messages, Fleet, Automations, Activity, Industry Packs, Affiliates, Settings
-const LINKS = [
-  { to: '/',        label: 'Dashboard', icon: LayoutGrid, end: true }, // exact match for home
-  { to: '/jobs',    label: 'Bookings',  icon: LayoutGrid },            // your Jobs (DashboardContent)
-  { to: '/contacts',label: 'Contacts',  icon: Users },
-  { to: '/calendar',label: 'Calendar',  icon: Calendar },
-  { to: '/estimator',label: 'Estimator',icon: FileText },
-  { to: '/chatter', label: 'Messages',  icon: MessageSquare },
-  { to: '/vehicles',label: 'Fleet',     icon: Truck },
-  { to: '/automations', label: 'Automations', icon: Bot },
-  { to: '/events',  label: 'Activity',  icon: Activity },
-  { to: '/packs',   label: 'Industry Packs', icon: Package },
-  { to: '/affiliate', label: 'Affiliates', icon: BadgeDollarSign },
-  { to: '/settings', label: 'Settings', icon: Settings },
-]
-
-// Render a single row so we can use NavLink’s children-as-a-function
+// ----- UI bits -----
 function LinkRow({ to, end, label, Icon }) {
   return (
     <NavLink
@@ -44,10 +28,11 @@ function LinkRow({ to, end, label, Icon }) {
                 : 'bg-transparent group-hover:bg-white/10',
             ].join(' ')}
           />
-          <Icon
-            size={18}
-            className={isActive ? 'text-white' : 'text-white/70 group-hover:text-white'}
-          />
+          {Icon ? (
+            <Icon size={18} className={isActive ? 'text-white' : 'text-white/70 group-hover:text-white'} />
+          ) : (
+            <span className="w-[18px]" />
+          )}
           <span className="truncate">{label}</span>
         </>
       )}
@@ -55,16 +40,78 @@ function LinkRow({ to, end, label, Icon }) {
   )
 }
 
+function SectionLabel({ children }) {
+  return (
+    <div className="px-3 pt-3 pb-1 text-[11px] uppercase tracking-[0.12em] text-white/50">
+      {children}
+    </div>
+  )
+}
+
+// ----- Grouped nav config -----
+const SECTIONS = [
+  {
+    label: 'Overview',
+    links: [{ to: '/', label: 'Dashboard', icon: LayoutGrid, end: true }],
+  },
+  {
+    label: 'CRM',
+    links: [
+      { to: '/contacts', label: 'Contacts',   icon: Users },
+      { to: '/chatter',  label: 'Messages',   icon: MessageSquare }, // customer messaging
+      { to: '/chat',     label: 'Team Chat',  icon: MessageSquare }, // internal chat
+    ],
+  },
+  {
+    label: 'Jobs',
+    links: [
+      { to: '/jobs',     label: 'Bookings', icon: LayoutGrid },
+      { to: '/calendar', label: 'Calendar', icon: Calendar },
+      { to: '/vehicles', label: 'Fleet',    icon: Truck },
+    ],
+  },
+  {
+    label: 'Accounting',
+    links: [
+      { to: '/estimator', label: 'Estimates', icon: FileText },
+      { to: '/invoices',  label: 'Invoices',  icon: BadgeDollarSign },
+    ],
+  },
+  {
+    label: 'Automation',
+    links: [
+      { to: '/automations', label: 'Automations', icon: Bot },
+      { to: '/events',      label: 'Activity',    icon: Activity },
+    ],
+  },
+  {
+    label: 'Catalog',
+    links: [
+      { to: '/packs',     label: 'Industry Packs', icon: Package },
+      { to: '/affiliate', label: 'Affiliates',     icon: BadgeDollarSign },
+    ],
+  },
+  {
+    label: 'Settings',
+    links: [{ to: '/settings', label: 'Settings', icon: Settings }],
+  },
+]
+
 export default function SideNav() {
   return (
-    <nav className="space-y-1">
-      <ul className="flex flex-col gap-1">
-        {LINKS.map(({ to, label, icon: Icon, end }) => (
-          <li key={to}>
-            <LinkRow to={to} end={end} label={label} Icon={Icon} />
-          </li>
-        ))}
-      </ul>
+    <nav className="space-y-2">
+      {SECTIONS.map(sec => (
+        <div key={sec.label}>
+          <SectionLabel>{sec.label}</SectionLabel>
+          <ul className="flex flex-col gap-1">
+            {sec.links.map(({ to, label, icon: Icon, end }) => (
+              <li key={to}>
+                <LinkRow to={to} end={end} label={label} Icon={Icon} />
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
     </nav>
   )
 }

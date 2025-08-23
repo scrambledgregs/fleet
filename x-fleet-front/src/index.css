@@ -11,18 +11,20 @@
 :root {
   color-scheme: dark;
 
-  /* Brand tokens (from Stylesheet 2024) */
-  --brand-white:  #eef1f3; /* Primary 1 */
-  --brand-gray:   #444849; /* Primary 2 */
-  --brand-orange: #ff052f; /* Neon Orange */
-  --brand-orange2:#ef4021; /* Orange mate */
+  /* Brand tokens */
+  --brand-white:  #eef1f3;
+  --brand-gray:   #444849;
+  --brand-orange: #ff052f;
+  --brand-orange2:#ef4021;
 
-  /* Status tokens (used by Voice AI indicator) */
-  --status-green:      #22c55e;  /* success */
-  --status-green-600:  #16a34a;  /* darker edge */
+  /* Status tokens */
+  --status-green:      #22c55e;
+  --status-green-600:  #16a34a;
   --status-green-glow: rgba(34,197,94,.28);
+  --topbar-h: 56px;
 }
 
+/* Allow normal window scroll again */
 html, body, #root { height: 100%; background: #0f1115; }
 
 @layer base {
@@ -30,7 +32,6 @@ html, body, #root { height: 100%; background: #0f1115; }
   a { @apply text-accent no-underline hover:opacity-90 focus:outline-none
              focus:ring-2 focus:ring-accent/30 rounded-sm transition; }
 
-  /* Consistent, accessible focus outline (no experimental CSS) */
   :focus-visible {
     outline: 2px solid rgba(255, 5, 47, .35);
     outline-offset: 2px;
@@ -41,38 +42,27 @@ html, body, #root { height: 100%; background: #0f1115; }
    Components
    ========================= */
 @layer components {
-  /* Panels — slightly crisper edges */
   .glass {
     @apply shadow-soft backdrop-blur border rounded-2xl;
-    background-color: rgb(22 27 34 / 0.95);   /* ~#161b22 @ 95% */
-    border-color: rgb(255 255 255 / 0.14);    /* was .12 → a touch more edge */
+    background-color: rgb(22 27 34 / 0.95);
+    border-color: rgb(255 255 255 / 0.14);
   }
-
   .glass-strong {
     @apply shadow-soft border rounded-2xl;
-    background-color: rgb(22 27 34 / 1);      /* solid panel */
-    border-color: rgb(255 255 255 / 0.20);    /* was .18 → slightly crisper */
+    background-color: rgb(22 27 34 / 1);
+    border-color: rgb(255 255 255 / 0.20);
   }
-
-  /* Helpers (no slash opacity in @apply) */
-  .ring-subtle {
-    @apply rounded-xl;
-    box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.10);
-  }
+  .ring-subtle { @apply rounded-xl; box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.10); }
   .divider { height: 1px; background: rgb(255 255 255 / 0.10); margin: 0.75rem 0; }
-  .text-muted { color: rgb(255 255 255 / 0.72); } /* was .65 → better readability */
+  .text-muted { color: rgb(255 255 255 / 0.72); }
 
-  /* Optional: interactive lift on clickable cards */
-  .card-hover {
-    transition: transform .15s ease, box-shadow .15s ease, background-color .15s ease;
-  }
+  .card-hover { transition: transform .15s, box-shadow .15s, background-color .15s; }
   .card-hover:hover {
     transform: translateY(-1px);
     box-shadow: 0 8px 24px rgba(0,0,0,.28);
     background-color: rgb(22 27 34 / 1);
   }
 
-  /* Status badges (keep CTAs orange-only) */
   .badge {
     display:inline-flex; align-items:center; gap:.375rem;
     height:1.25rem; padding:0 .5rem; border-radius:9999px;
@@ -84,7 +74,6 @@ html, body, #root { height: 100%; background: #0f1115; }
   .badge-info    { border-color: rgba(96,165,250,.22); background: rgba(96,165,250,.12); color:#d5e8ff; }
   .badge-warn    { border-color: rgba(245,158,11,.22); background: rgba(245,158,11,.12); color:#ffe8bf; }
 
-  /* Optional: sticky table header helper (apply .table-sticky to a table) */
   .table-sticky thead { position: sticky; top: 0; z-index: 10; background: rgb(22 27 34 / 1); }
   .table-sticky th { border-bottom: 1px solid rgb(255 255 255 / 0.20); }
   .table-sticky tbody tr + tr { border-top: 1px dashed rgb(255 255 255 / 0.12); }
@@ -93,17 +82,13 @@ html, body, #root { height: 100%; background: #0f1115; }
 /* =========================
    Topbar & Buttons
    ========================= */
-/* Common topbar shell */
 .topbar-base{
-  position: sticky; top: 0; z-index: 40; height: 56px;
+  position: sticky; top: 0; z-index: 40; height: var(--topbar-h);
   border-bottom: 1px solid rgba(0,0,0,.18);
-  /* subtle separation without changing color */
   box-shadow: 0 1px 0 rgba(255,255,255,.06), 0 8px 24px rgba(0,0,0,.20);
 }
-/* Light-appearance for the 'light' variant so native controls render appropriately */
 .topbar--light { color-scheme: light; }
 
-/* Buttons (shared) */
 .btn-primary{
   background: var(--brand-orange);
   color: #fff; border-radius: 9999px;
@@ -113,7 +98,6 @@ html, body, #root { height: 100%; background: #0f1115; }
 }
 .btn-primary:hover{ background: var(--brand-orange2); }
 
-/* (fixed) leading dot so the class actually applies */
 .btn-secondary{
   background: rgba(255,255,255,.12);
   border: 1px solid rgba(255,255,255,.18);
@@ -123,17 +107,14 @@ html, body, #root { height: 100%; background: #0f1115; }
 }
 .btn-secondary:hover{ background: rgba(255,255,255,.18); }
 
-/* Ghost button for Settings (dark headers) */
 .btn-ghost{ color: rgba(255,255,255,.8); display: inline-flex; align-items: center; height: 2rem; line-height: 2rem; }
 .btn-ghost:hover{ color: #fff; }
 
-/* Ensure anchor buttons don’t inherit base link color */
 a.btn-primary, a.btn-secondary, a.btn-ghost { text-decoration: none; color: inherit; }
 
 /* =========================
    Layout spacing
    ========================= */
-/* Let Tailwind gap utilities control spacing (removed old !important overrides) */
 main.grid > * { min-height: 0; }
 
 /* Polished dark scrollbars (optional) */
@@ -142,8 +123,6 @@ main.grid > * { min-height: 0; }
 *::-webkit-scrollbar-track { background: transparent; }
 *::-webkit-scrollbar-thumb {
   background: rgba(255,255,255,.22);
-  border-radius: 8px;
-  border: 2px solid transparent;
-  background-clip: padding-box;
+  border-radius: 8px; border: 2px solid transparent; background-clip: padding-box;
 }
 *::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.32); }

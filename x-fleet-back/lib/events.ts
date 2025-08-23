@@ -1,4 +1,4 @@
-// lib/events.ts
+// x-fleet-back/lib/events.ts
 import crypto from 'crypto'
 
 export type EventName =
@@ -9,6 +9,11 @@ export type EventName =
   | 'appointment.assigned'
   | 'sms.inbound'
   | 'sms.outbound'
+  | 'estimate.intent.created'
+  | 'estimate.accepted'
+  | 'invoice.created'
+  | 'invoice.paid'
+  | 'invoice.deposit.created';
 
 // NEW: who triggered the event (optional)
 export type EventActor =
@@ -30,7 +35,7 @@ export type BaseEvent<T = unknown> = {
   name: EventName
   ts: string            // ISO timestamp
   clientId: string
-  source: 'api' | 'web' | 'webhook' | 'system'
+  source: 'api' | 'web' | 'webhook' | 'system' | 'public'
   // NEW (all optional/backward-compatible):
   mode?: 'manual' | 'automatic'
   actor?: EventActor

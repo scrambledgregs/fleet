@@ -17,7 +17,8 @@ export function ttlMap<K = any, V = any>(
   const max = Number.isFinite(opts.max) ? (opts.max as number) : undefined;
   const norm = typeof opts.normalizeKey === 'function' ? opts.normalizeKey : (k: K) => String(k);
 
-  const store = new Map<string, { v: V; t: number }>(); // normalizedKey -> { v, t }
+  // normalizedKey -> { v, t }
+  const store = new Map<string, { v: V; t: number }>();
 
   const api = {
     get(key: K): V | null {
@@ -28,7 +29,7 @@ export function ttlMap<K = any, V = any>(
         store.delete(k);
         return null;
       }
-      // refresh LRU by re-inserting
+      // refresh LRU by re-inserting (preserve original timestamp for TTL)
       store.delete(k);
       store.set(k, { v: row.v, t: row.t });
       return row.v;
@@ -134,7 +135,13 @@ export const vehiclesByClient = new Map<TenantId, Vehicle[]>();
 export const contactsByClient = new Map<TenantId, Map<string, ContactSummary>>();
 
 // Per-contact AI autopilot preference (keyed by contact id or E.164 phone)
-export const autopilotPref = new Map<string, boolean>();
+// Use prefixes to avoid any accidental collisions if an id looked like a phone.
+const autopilotPref = new Map<string, boolean>();
+
+function autoKey(kind: 'id' | 'phone', val?: string | null) {
+  const v = (val ?? '').toString().trim();
+  return v ? `${kind}:${v}` : '';
+}
 
 // --- Helper accessors (server.js can import & use these) ---
 export function jobsMap(clientId?: string) {
@@ -165,14 +172,18 @@ export function contactBag(clientId?: string) {
 export function setAutoPref(args: { id?: string | null; phone?: string | null; enabled: boolean }) {
   const { id, phone, enabled } = args || {};
   if (typeof enabled !== 'boolean') return;
-  if (id) autopilotPref.set(String(id), enabled);
-  if (phone) autopilotPref.set(String(phone), enabled);
+  const idKey = autoKey('id', id);
+  const phKey = autoKey('phone', phone);
+  if (idKey) autopilotPref.set(idKey, enabled);
+  if (phKey) autopilotPref.set(phKey, enabled);
 }
 
 export function getAutoPref(args: { id?: string | null; phone?: string | null }) {
   const { id, phone } = args || {};
-  if (id != null && autopilotPref.has(String(id))) return autopilotPref.get(String(id))!;
-  if (phone != null && autopilotPref.has(String(phone))) return autopilotPref.get(String(phone))!;
+  const idKey = autoKey('id', id);
+  const phKey = autoKey('phone', phone);
+  if (idKey && autopilotPref.has(idKey)) return autopilotPref.get(idKey)!;
+  if (phKey && autopilotPref.has(phKey)) return autopilotPref.get(phKey)!;
   return null; // means “no override saved”
 }
 
