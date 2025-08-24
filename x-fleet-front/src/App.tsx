@@ -21,8 +21,14 @@ import Onboarding from './pages/Onboarding.jsx'
 import Signup from './pages/Signup.jsx'
 import AutomationsPage from './pages/Automations'
 import RequestAppointment from './pages/RequestAppointment.jsx'
-import FloatingCTA from './components/FloatingCTA.jsx'
-import InternalChat from './pages/InternalChat'  // make sure this default-exports the page
+
+// 🔻 updated: import without extension so it resolves FloatingCTA.tsx
+import FloatingCTA from './components/FloatingCTA'
+
+// 🔻 no longer routing directly to InternalChat
+// import InternalChat from './pages/InternalChat'
+import Team from './pages/Team'
+import TeamFeed from './pages/TeamFeed'
 
 function RequireSetup({ children }: { children: ReactNode }) {
   return <>{children}</>
@@ -35,7 +41,6 @@ export default function App() {
   return (
     <Router>
       <Routes>
-        {/* PAGES WITH CHROME */}
         <Route
           element={
             <AppShell
@@ -46,29 +51,31 @@ export default function App() {
             />
           }
         >
-          {/* HOME → Metrics Dashboard */}
-          <Route
-            index
-            element={
-              <RequireSetup>
-                <Dashboard />
-              </RequireSetup>
-            }
-          />
-          {/* Aliases for the dashboard */}
+          <Route index element={<RequireSetup><Dashboard /></RequireSetup>} />
           <Route path="dashboard" element={<Dashboard />} />
           <Route path="home" element={<Navigate to="/" replace />} />
 
-          {/* Jobs/Bookings board */}
+          {/* Jobs/Bookings */}
           <Route path="jobs" element={<DashboardContent mode={mode} />} />
           <Route path="bookings" element={<Navigate to="/jobs" replace />} />
 
           {/* CRM */}
           <Route path="contacts" element={<ContactsPage />} />
           <Route path="chatter" element={<Chatter />} />
-          <Route path="chat" element={<InternalChat />} />
 
-          {/* Other sections */}
+          {/* 🔁 Team hub (chat + directory + feed) */}
+          <Route path="team">
+            <Route index element={<Team />} />
+            <Route path="feed" element={<TeamFeed />} />
+          </Route>
+
+          {/* 🔀 Legacy alias: /chat → /team */}
+          <Route path="chat" element={<Navigate to="/team" replace />} />
+
+          {/* (Optional) alias to open directory tab directly */}
+          <Route path="directory" element={<Navigate to="/team?tab=directory" replace />} />
+
+          {/* Other */}
           <Route path="vehicles" element={<VehiclesPage />} />
           <Route path="calendar" element={<Calendar />} />
           <Route path="packs" element={<IndustryPacks />} />
@@ -81,7 +88,7 @@ export default function App() {
           <Route path="settings" element={<Settings />} />
         </Route>
 
-        {/* PAGES WITHOUT CHROME */}
+        {/* No-chrome pages */}
         <Route path="/signup" element={<Signup />} />
         <Route path="/onboarding" element={<Onboarding />} />
         <Route path="/requestappointment" element={<RequestAppointment />} />

@@ -33,6 +33,8 @@ import { aiEstimate } from './lib/estimate.ts';
 import contactsRouter from './routes/contacts.ts';
 import { createEvent, recordAndEmit, listEvents } from './lib/events.ts';
 import { registerAutomationRoutes, dispatchEvent } from './lib/automations.ts';
+import { makeChatRouter } from './routes/chat';
+import { makeTeamRouter } from './routes/team';
 
 // 🔁 Central repo: one place for all in-memory stores & caches
 import {
@@ -191,6 +193,8 @@ app.use(withTenant);
 app.use(cors({ origin: process.env.ALLOW_ORIGIN || '*' }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
+app.use('/api/chat', makeChatRouter(io));
+app.use('/api/team', makeTeamRouter(io));
 
 app.use((req, _res, next) => {
   console.log(`[REQ] ${req.method} ${req.url} ct=${req.headers['content-type'] || ''}`);

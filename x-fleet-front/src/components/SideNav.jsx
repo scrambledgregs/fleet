@@ -55,11 +55,11 @@ const SECTIONS = [
     links: [{ to: '/', label: 'Dashboard', icon: LayoutGrid, end: true }],
   },
   {
-    label: 'CRM',
+    label: 'LEADS',
     links: [
       { to: '/contacts', label: 'Contacts',   icon: Users },
       { to: '/chatter',  label: 'Messages',   icon: MessageSquare }, // customer messaging
-      { to: '/chat',     label: 'Team Chat',  icon: MessageSquare }, // internal chat
+      { to: '/team',     label: 'Team Chat',  icon: MessageSquare }, // internal chat
     ],
   },
   {

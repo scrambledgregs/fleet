@@ -1,13 +1,13 @@
 // src/pages/Settings.tsx
 import React, { useState } from 'react'
 import { Plug, Phone, Mail, ShieldCheck } from 'lucide-react'
+import TeamSettingsCard from '../components/TeamSettingsCard'
 
 // These can stay .jsx for now; TS can import them just fine.
 import TeamSettings from '../settings/TeamSettings.jsx'
 import VehiclesSettings from '../settings/VehiclesSettings.jsx'
 
 type Tab = 'team' | 'vehicles' | 'integrations' | 'company'
-
 type IntegrationStatus = 'connected' | 'disconnected' | 'pending'
 
 function Badge({ state }: { state: IntegrationStatus }) {
@@ -18,9 +18,7 @@ function Badge({ state }: { state: IntegrationStatus }) {
   }
   const label =
     state === 'connected' ? 'Connected' : state === 'pending' ? 'Pending' : 'Not connected'
-  return (
-    <span className={`text-[11px] px-2 py-0.5 rounded-md border ${map[state]}`}>{label}</span>
-  )
+  return <span className={`text-[11px] px-2 py-0.5 rounded-md border ${map[state]}`}>{label}</span>
 }
 
 function TabButton({
@@ -37,9 +35,7 @@ function TabButton({
       onClick={onClick}
       className={
         'px-3 py-1.5 rounded-lg text-sm font-medium transition ' +
-        (active
-          ? 'bg-[var(--brand-orange)] text-white shadow-sm'
-          : 'glass hover:bg-white/10')
+        (active ? 'bg-[var(--brand-orange)] text-white shadow-sm' : 'glass hover:bg-white/10')
       }
     >
       {children}
@@ -54,13 +50,13 @@ export default function Settings() {
   const [twilio, setTwilio] = useState<IntegrationStatus>('disconnected')
   const [mailgun, setMailgun] = useState<IntegrationStatus>('disconnected')
 
+  // Show/hide the legacy/advanced team panel to prevent duplicate controls
+  const [showAdvancedTeam, setShowAdvancedTeam] = useState(false)
+
   function startTwilioSetup() {
-    // Wire this to your real flow (modal, wizard route, etc.)
-    // Example: navigate('/onboarding#twilio') or open a modal
     setTwilio('pending')
     window.dispatchEvent(new CustomEvent('integrations:twilio:start'))
   }
-
   function startMailgunSetup() {
     setMailgun('pending')
     window.dispatchEvent(new CustomEvent('integrations:mailgun:start'))
@@ -87,7 +83,28 @@ export default function Settings() {
         </div>
       </div>
 
-      {tab === 'team' && <TeamSettings />}
+      {tab === 'team' && (
+        <div className="space-y-4">
+          {/* Actions/“buttons above the panel” */}
+          <TeamSettingsCard />
+
+          {/* Advanced (optional) — hide by default to avoid duplicate controls */}
+          <div className="flex items-center justify-between mt-2">
+            <div className="text-xs text-white/50">
+              Need to manage the roster and sync techs? Open advanced team management.
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowAdvancedTeam((v) => !v)}
+              className="text-xs rounded-md border border-white/10 px-2 py-1 hover:bg-white/10"
+            >
+              {showAdvancedTeam ? 'Hide advanced' : 'Show advanced'}
+            </button>
+          </div>
+
+          {showAdvancedTeam && <TeamSettings />}
+        </div>
+      )}
 
       {tab === 'vehicles' && <VehiclesSettings />}
 
@@ -124,7 +141,7 @@ export default function Settings() {
                 {twilio === 'connected' ? 'Manage' : 'Connect Twilio'}
               </button>
               <a
-                href="https://www.twilio.com/docs/usage/a2p" // safe external doc link
+                href="https://www.twilio.com/docs/usage/a2p"
                 target="_blank"
                 rel="noreferrer"
                 className="text-xs text-white/60 hover:text-white underline"
@@ -165,7 +182,7 @@ export default function Settings() {
                 {mailgun === 'connected' ? 'Manage' : 'Connect Mailgun'}
               </button>
               <a
-                href="https://documentation.mailgun.com/en/latest/" // docs
+                href="https://documentation.mailgun.com/en/latest/"
                 target="_blank"
                 rel="noreferrer"
                 className="text-xs text-white/60 hover:text-white underline"

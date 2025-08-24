@@ -123,7 +123,7 @@ export default function InternalChat() {
       setLoadingMsgs(false);
       requestAnimationFrame(() => {
         const el = scrollerRef.current;
-        if (!el || isNearBottom(el, el.scrollHeight)) {
+        if (el && el.scrollHeight > el.clientHeight && isNearBottom(el, 140)) {
           bottomRef.current?.scrollIntoView({ behavior: 'auto' });
         }
       });
@@ -260,8 +260,7 @@ export default function InternalChat() {
 
   return (
     // Fixed viewport height + min-h-0 to prevent any child from expanding layout
-    <div className="flex h-[calc(100vh-64px)] min-h-0 bg-zinc-950 text-zinc-100">
-      {/* Left: channels */}
+<div className="flex h-full min-h-0 bg-zinc-950 text-zinc-100">      {/* Left: channels */}
       <aside className="w-72 border-r border-zinc-800/80 bg-zinc-900/60 backdrop-blur-md min-h-0 flex flex-col">
         <div className="px-4 py-3 border-b border-zinc-800/80">
           <h2 className="text-sm font-semibold tracking-wide">Team Chat</h2>
@@ -331,10 +330,9 @@ export default function InternalChat() {
       </aside>
 
       {/* Right: messages */}
-      <main className="flex-1 min-h-0 flex flex-col">
+      <main ref={scrollerRef} className="flex-1 min-h-0 flex flex-col overflow-y-auto">
         {/* Header */}
-        <div className="px-4 py-3 border-b border-zinc-800/80 bg-zinc-900/60 backdrop-blur-md">
-          <div className="text-sm font-semibold tracking-wide">
+            <div className="sticky top-0 z-10 px-4 py-3 border-b border-zinc-800/80 bg-zinc-900/60 backdrop-blur-md">          <div className="text-sm font-semibold tracking-wide">
             {activeChan ? `#${activeChan.name}` : 'Select a channel'}
           </div>
           {activeChan?.topic ? (
@@ -346,10 +344,9 @@ export default function InternalChat() {
 
         {/* Messages list */}
         <div
-          ref={scrollerRef}
-          className="flex-1 overflow-y-auto p-4 bg-[linear-gradient(180deg,#0b0b0f_0%,#0f0f15_100%)] min-h-0"
-          aria-live="polite"
-        >
+            className="flex-1 min-h-0 p-4 bg-[linear-gradient(180deg,#0b0b0f_0%,#0f0f15_100%)]"
+            aria-live="polite"
+            >
           {loadingMsgs && <div className="text-sm text-zinc-400">Loading messages…</div>}
           {!loadingMsgs && !msgs.length && activeChan && (
             <div className="text-sm text-zinc-500">No messages yet.</div>
@@ -415,7 +412,7 @@ export default function InternalChat() {
             e.preventDefault();
             sendMessage();
           }}
-          className="sticky bottom-0 p-3 border-t border-zinc-800/80 bg-zinc-900/80 backdrop-blur-md"
+          className="sticky bottom-0 z-10 p-3 border-t border-zinc-800/80 bg-zinc-900/80 backdrop-blur-md"
         >
           <div className="flex items-end gap-2">
             <textarea
