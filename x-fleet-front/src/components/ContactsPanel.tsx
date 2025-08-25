@@ -1,5 +1,5 @@
-// src/components/ContactsPanel.tsx
-import React, { useEffect, useMemo, useState } from 'react'
+// x-fleet-front/src/components/ContactsPanel.tsx
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
   User, Phone, Mail, MapPin, CalendarDays, ChevronDown,
   MessageSquare, FileText, Plus, Info
@@ -42,11 +42,17 @@ type Appointment = {
   territory?: string
 }
 
+type Counts = { all: number; customers: number; leads: number }
+
 type ContactsPanelProps = {
   query?: string
   sortBy?: 'recent' | 'name'
   segment?: 'all' | 'customers' | 'leads'
   onCreateContact?: () => void
+  /** optional: render a toolbar (unused here but accepted to avoid prop errors) */
+  showToolbar?: boolean
+  /** notify parent with counts derived from the full contacts list */
+  onCounts?: (c: Counts) => void
 }
 
 function Chip({
@@ -90,11 +96,23 @@ function normalizeDispo(d: any): DispositionEntry {
   }
 }
 
+function computeCounts(rows: ContactRecord[]): Counts {
+  const out: Counts = { all: rows.length, customers: 0, leads: 0 }
+  for (const r of rows) {
+    const kind = (r.kind || r.type || '').toString().toLowerCase()
+    if (kind.includes('customer')) out.customers++
+    if (kind.includes('lead')) out.leads++
+  }
+  return out
+}
+
 export default function ContactsPanel({
   query: externalQuery = '',
   sortBy: externalSortBy = 'recent',
   segment: externalSegment = 'all',
   onCreateContact,
+  showToolbar, // accepted but not used yet
+  onCounts,
 }: ContactsPanelProps) {
   const navigate = useNavigate()
 
@@ -108,6 +126,11 @@ export default function ContactsPanel({
   const [openId, setOpenId] = useState<string | null>(null)
   const [openSeed, setOpenSeed] = useState<any>(null)
 
+  // Keep latest onCounts without making it a dependency
+  const onCountsRef = useRef<typeof onCounts>(onCounts)
+  useEffect(() => { onCountsRef.current = onCounts }, [onCounts])
+
+  // Fetch once on mount
   useEffect(() => {
     let alive = true
     ;(async () => {
@@ -116,7 +139,10 @@ export default function ContactsPanel({
         if (!r.ok) throw new Error('Failed to load contacts')
         const j = await r.json()
         if (!alive) return
-        setContacts((j.contacts || []) as ContactRecord[])
+        const rows = (j.contacts || []) as ContactRecord[]
+        setContacts(rows)
+        // push counts up to parent (via ref)
+        onCountsRef.current?.(computeCounts(rows))
       } catch (e: any) {
         if (!alive) return
         setError(e?.message || 'Load error')
@@ -124,10 +150,13 @@ export default function ContactsPanel({
         if (alive) setLoading(false)
       }
     })()
-    return () => {
-      alive = false
-    }
+    return () => { alive = false }
   }, [])
+
+  // If contacts change later, keep counts fresh
+  useEffect(() => {
+    if (!loading && !error) onCountsRef.current?.(computeCounts(contacts))
+  }, [contacts, loading, error])
 
   async function toggleContact(c: ContactRecord) {
     setExpanded(s => ({ ...s, [c.id]: !s[c.id] }))

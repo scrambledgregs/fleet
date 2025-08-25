@@ -1,12 +1,12 @@
 // x-fleet-front/src/App.tsx
 import { useState, type ReactNode } from 'react'
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import AppShell from './layout/AppShell.jsx'
 
 // Pages
 import Dashboard from './pages/Dashboard'
 import DashboardContent from './pages/DashboardContent.jsx'
-import ContactsPage from './pages/Contacts.jsx'
+import ContactsPage from './pages/Contacts'
 import VehiclesPage from './pages/Vehicles.jsx'
 import Calendar from './pages/Calendar.jsx'
 import Affiliate from './pages/Affiliate.jsx'
@@ -34,6 +34,13 @@ import TeamFeed from './pages/TeamFeed'
 
 function RequireSetup({ children }: { children: ReactNode }) {
   return <>{children}</>
+}
+
+function RouteAwareHUD() {
+  const { pathname } = useLocation();
+  // Hide the floating HUD anywhere under /phones
+  if (pathname.startsWith('/phones')) return null;
+  return <VoiceHUD />;
 }
 
 export default function App() {
@@ -99,11 +106,10 @@ export default function App() {
         {/* Fallback */}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-
+      <RouteAwareHUD />
       <FloatingCTA />
 
-      {/* Mount the Voice HUD globally so it overlays all routes */}
-      <VoiceHUD />
+      
     </Router>
   )
 }
