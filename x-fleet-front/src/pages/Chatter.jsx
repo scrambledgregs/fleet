@@ -4,6 +4,7 @@ import { useEffect, useState, useMemo, useRef } from 'react'
 import { API_BASE } from '../config'
 import EmailDraftComposer from '../components/EmailDraftComposer'
 import { makeSocket, getTenantId, withTenant } from '../lib/socket'
+import { initVoiceClient } from '../lib/voice'
 
 export default function Chatter() {
   const { contactId } = useParams()
@@ -34,6 +35,13 @@ export default function Chatter() {
 
   // tenant-scoped socket
   const socket = useMemo(() => makeSocket(), [])
+
+  // Voice: bridge window events <-> server socket
+ useEffect(() => {
+   if (!socket) return
+   initVoiceClient(socket, tenantId)
+   // cleanup not strictly needed; socket is closed on unmount below
+ }, [socket, tenantId])
 
   // conversations (left rail)
   const [contacts, setContacts] = useState([])
@@ -452,6 +460,13 @@ export default function Chatter() {
             >
               New thread
             </button>
+            <button
+  className="px-2 py-1 rounded-none glass text-[11px]"
+  onClick={() => window.dispatchEvent(new CustomEvent('voicehud:open'))}
+  title="Open Voice HUD"
+>
+  Call
+</button>
           </div>
         </div>
 

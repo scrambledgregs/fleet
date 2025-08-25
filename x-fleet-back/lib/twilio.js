@@ -71,32 +71,40 @@ async function placeCall(to, opts = {}) {
   const client = getClient()
   const { from } = getFromConfig()
 
-  // record from answer dual
+  // ws:// or wss:// endpoint Twilio will stream audio to
+  const wsBase = (process.env.PUBLIC_URL || 'http://localhost:8080').replace(/^http/i, 'ws')
+  const tenantId = (opts.tenantId || 'default').toLowerCase()
+  const mediaUrl = `${wsBase}/twilio/media?tenantId=${encodeURIComponent(tenantId)}`
 
-const twiml = new twilio.twiml.VoiceResponse()
+  // Build TwiML: start media stream, then dial, and record dual-channel
+  const vr = new twilio.twiml.VoiceResponse()
 
-// Always-on recording (dual channel) + webhook to receive recording status
-const recordingCb =
-  process.env.TWILIO_RECORDING_CALLBACK_URL ||
-  `${process.env.PUBLIC_URL}/twilio/recording-status`
+  const start = vr.start()
+  start.stream({ url: mediaUrl })
 
-const dial = twiml.dial({
-  callerId: from,
-  // Start recording once the call is answered; use dual-channel for rep/customer separation
-  record: 'record-from-answer-dual',
-  // Tell Twilio where to POST when a recording is ready (we'll add the route next)
-  recordingStatusCallback: recordingCb,
-  // Keep it simple: notify only when the recording is completed
-  recordingStatusCallbackEvent: 'completed',
-})
+  const recordingCb =
+    process.env.TWILIO_RECORDING_CALLBACK_URL ||
+    `${process.env.PUBLIC_URL}/twilio/recording-status?clientId=${encodeURIComponent(tenantId)}`
 
-dial.number(ensureE164(to))
+  const dial = vr.dial({
+    callerId: from,
+    record: 'record-from-answer-dual',
+    recordingStatusCallback: recordingCb,
+    recordingStatusCallbackEvent: 'completed',
+  })
 
+  dial.number(ensureE164(to))
+
+  // Place the call using our TwiML
   return client.calls.create({
-    twiml: twiml.toString(),
     to: ensureE164(to),
     from,
-    ...opts, // e.g. statusCallback, machineDetection, etc.
+    twiml: vr.toString(),
+    statusCallback:
+      opts.statusCallback || `${process.env.PUBLIC_URL}/twilio/voice-status`,
+    statusCallbackEvent:
+      opts.statusCallbackEvent || ['initiated', 'ringing', 'answered', 'completed'],
+    ...opts, // allow overrides
   })
 }
 

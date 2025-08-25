@@ -20,7 +20,9 @@ import Settings from './pages/Settings'
 import Onboarding from './pages/Onboarding.jsx'
 import Signup from './pages/Signup.jsx'
 import AutomationsPage from './pages/Automations'
+import PhonePage from './pages/PhonePage'
 import RequestAppointment from './pages/RequestAppointment.jsx'
+import VoiceHUD from './components/VoiceHUD'
 
 // 🔻 updated: import without extension so it resolves FloatingCTA.tsx
 import FloatingCTA from './components/FloatingCTA'
@@ -84,6 +86,7 @@ export default function App() {
           <Route path="measure/roof" element={<RoofMeasure />} />
           <Route path="invoices" element={<Invoices />} />
           <Route path="events" element={<EventsPage />} />
+          <Route path="phones" element={<PhonePage />} />
           <Route path="automations" element={<AutomationsPage />} />
           <Route path="settings" element={<Settings />} />
         </Route>
@@ -98,6 +101,9 @@ export default function App() {
       </Routes>
 
       <FloatingCTA />
+
+      {/* Mount the Voice HUD globally so it overlays all routes */}
+      <VoiceHUD />
     </Router>
   )
 }

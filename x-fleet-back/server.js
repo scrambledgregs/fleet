@@ -7,11 +7,13 @@ import cors from 'cors';
 import fetch from 'node-fetch';
 import axios from 'axios';
 
-
+import twilio from 'twilio';
+import { verifyTwilio } from './lib/twilio.js';
 import { scoreAllReps } from './lib/fit.js';
 import { sendSMS, placeCall } from './lib/twilio.js';
 import { handleInbound as agentHandle } from './lib/agent.js';
-import { recordSms, normalizePhone as phoneE164 } from './lib/chatter.js';
+import { recordSms, normalizePhone as phoneE164, getThread } from './lib/chatter.js';
+
 
 import {
   getContact,
@@ -36,6 +38,7 @@ import { registerAutomationRoutes, dispatchEvent } from './lib/automations.ts';
 import { makeChatRouter } from './routes/chat';
 import { makeTeamRouter } from './routes/team';
 
+
 // 🔁 Central repo: one place for all in-memory stores & caches
 import {
   geocodeCache,
@@ -57,14 +60,73 @@ import {
   removeTenantPhone,
   listTenantPhoneMap,
 } from './lib/repos/tenants.ts';
+import { WebSocketServer } from 'ws'
+
+// WebSocket server for Twilio Media Streams
+const mediaWSS = new WebSocketServer({ noServer: true })
+
+// Path Twilio will connect to for Media Streams
+const VOICE_WS_PATH = '/twilio/media';
+
+// Prefer PUBLIC_WS_URL (wss://...), else derive from PUBLIC_URL
+function publicWsUrl() {
+  const explicit = (process.env.PUBLIC_WS_URL || '').trim();
+  if (explicit) return explicit.replace(/\/$/, '');
+  const base = (process.env.PUBLIC_URL || '').trim().replace(/\/$/, '');
+  if (!base) return '';
+  return base.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:');
+}
+
+
+
+// Basic handler: logs stream lifecycle and forwards key events to the UI
+mediaWSS.on('connection', (ws, req) => {
+  const url = new URL(req.url, 'http://localhost'); // base is ignored
+  const tenantId = (url.searchParams.get('tenantId') || 'default').toLowerCase();
+
+  ws.on('message', (buf) => {
+    let msg;
+    try { msg = JSON.parse(buf.toString()); } catch { return; }
+
+    // Twilio sends 'start' | 'media' | 'stop' events
+    if (msg.event === 'start') {
+      emitTenant(tenantId, 'voice:media', {
+        type: 'start',
+        streamSid: msg.start?.streamSid || null,
+        callSid: msg.start?.callSid || null,
+        at: new Date().toISOString(),
+      });
+    } else if (msg.event === 'media') {
+      // msg.media.payload is base64 PCM-16 mono @8kHz
+      // hook your voice AI here (decode, transcribe, respond, etc.)
+    } else if (msg.event === 'stop') {
+      emitTenant(tenantId, 'voice:media', { type: 'stop', at: new Date().toISOString() });
+      ws.close();
+    }
+  });
+
+  ws.on('close', () => {
+    emitTenant(tenantId, 'voice:media', { type: 'ws_closed', at: new Date().toISOString() });
+  });
+});
 
 const app = express();
 const server = http.createServer(app);
 const CHATTER_AI = process.env.CHATTER_AI === 'true';
 
+// Upgrade HTTP to WebSocket for Twilio Media Streams
+server.on('upgrade', (req, socket, head) => {
+  if (!req.url || !req.url.startsWith(VOICE_WS_PATH)) return;
+  mediaWSS.handleUpgrade(req, socket, head, (ws) => {
+    mediaWSS.emit('connection', ws, req);
+  });
+});
+
 const io = new SocketIOServer(server, {
   cors: { origin: process.env.ALLOW_ORIGIN || '*', methods: ['GET', 'POST'] },
 });
+
+
 
 // ---- Socket.IO tenant scoping ----
 io.use((socket, next) => {
@@ -195,6 +257,7 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use('/api/chat', makeChatRouter(io));
 app.use('/api/team', makeTeamRouter(io));
+
 
 app.use((req, _res, next) => {
   console.log(`[REQ] ${req.method} ${req.url} ct=${req.headers['content-type'] || ''}`);
@@ -397,6 +460,133 @@ app.delete('/api/tenants/phone-map', (req, res) => {
   if (!phone) return res.status(400).json({ ok: false, error: 'phone required' });
   removeTenantPhone(phone);
   res.json({ ok: true, removed: phone });
+});
+
+// --- Voice numbers & assignments (in-memory) ---
+// Purpose:
+// 1) Registry of tenant-owned numbers
+// 2) Per-user direct number assignment
+// 3) Optional per-tenant rollover order (array of numbers)
+// All in-memory for now; swap to DB later.
+
+const voiceNumbersByTenant = new Map();   // tenantId -> Set<phone>
+const userNumberByTenant = new Map();     // tenantId -> Map<userId, phone>
+const rolloverByTenant = new Map();       // tenantId -> Array<phone>
+
+// helpers
+function bagSet(map, key) {
+  const k = String(key || 'default').toLowerCase();
+  if (!map.has(k)) map.set(k, new Set());
+  return map.get(k);
+}
+function bagMap(map, key) {
+  const k = String(key || 'default').toLowerCase();
+  if (!map.has(k)) map.set(k, new Map());
+  return map.get(k);
+}
+function listTenantNumbers(tenantId) {
+  return Array.from(voiceNumbersByTenant.get(String(tenantId).toLowerCase()) || []);
+}
+
+// GET numbers for a tenant
+app.get('/api/voice/numbers', (req, res) => {
+  const tenantId = (req.query.tenantId || req.tenantId || 'default').toLowerCase();
+  res.json({
+    ok: true,
+    tenantId,
+    numbers: listTenantNumbers(tenantId),
+    assignments: Array.from(bagMap(userNumberByTenant, tenantId).entries())
+      .map(([userId, phone]) => ({ userId, phone })),
+    rollover: Array.from(rolloverByTenant.get(tenantId) || []),
+  });
+});
+
+// POST add/buy (register) a number for a tenant
+// Body: { phone: string(E.164), tenantId?: string }
+app.post('/api/voice/numbers', (req, res) => {
+  const tenantId = (req.body?.tenantId || req.tenantId || 'default').toLowerCase();
+  const phone = phoneE164(req.body?.phone || '');
+  if (!phone) return res.status(400).json({ ok: false, error: 'phone required' });
+
+  const set = bagSet(voiceNumbersByTenant, tenantId);
+  set.add(phone);
+
+  // keep your global phone→tenant resolver in sync
+  setTenantPhone(phone, tenantId);
+
+  emitTenant(tenantId, 'voice:numbers:update', { numbers: Array.from(set) });
+  res.status(201).json({ ok: true, tenantId, phone });
+});
+
+// DELETE remove a number from a tenant
+// Body or query: { phone }
+app.delete('/api/voice/numbers', (req, res) => {
+  const tenantId = (req.body?.tenantId || req.query?.tenantId || req.tenantId || 'default').toLowerCase();
+  const phone = phoneE164(req.body?.phone || req.query?.phone || '');
+  if (!phone) return res.status(400).json({ ok: false, error: 'phone required' });
+
+  const set = bagSet(voiceNumbersByTenant, tenantId);
+  set.delete(phone);
+  removeTenantPhone(phone); // also remove from resolver
+
+  // also unassign from any user
+  const map = bagMap(userNumberByTenant, tenantId);
+  for (const [uid, p] of map.entries()) if (p === phone) map.delete(uid);
+
+  // prune from rollover
+  const roll = (rolloverByTenant.get(tenantId) || []).filter(n => n !== phone);
+  rolloverByTenant.set(tenantId, roll);
+
+  emitTenant(tenantId, 'voice:numbers:update', { numbers: Array.from(set) });
+  res.json({ ok: true, tenantId, removed: phone });
+});
+
+// POST assign a number to a user
+// Body: { userId: string, phone: string(E.164), tenantId?: string }
+app.post('/api/voice/assign', (req, res) => {
+  const tenantId = (req.body?.tenantId || req.tenantId || 'default').toLowerCase();
+  const userId = String(req.body?.userId || '').trim();
+  const phone = phoneE164(req.body?.phone || '');
+  if (!userId || !phone) return res.status(400).json({ ok: false, error: 'userId and phone required' });
+
+  const set = bagSet(voiceNumbersByTenant, tenantId);
+  if (!set.has(phone)) return res.status(400).json({ ok: false, error: 'phone not registered for tenant' });
+
+  const map = bagMap(userNumberByTenant, tenantId);
+  map.set(userId, phone);
+
+  emitTenant(tenantId, 'voice:assign:update', { userId, phone });
+  res.json({ ok: true, tenantId, userId, phone });
+});
+
+// GET assignments for a tenant
+app.get('/api/voice/assign', (req, res) => {
+  const tenantId = (req.query?.tenantId || req.tenantId || 'default').toLowerCase();
+  const map = bagMap(userNumberByTenant, tenantId);
+  res.json({
+    ok: true,
+    tenantId,
+    assignments: Array.from(map.entries()).map(([userId, phone]) => ({ userId, phone })),
+  });
+});
+
+// POST set rollover order for a tenant
+// Body: { tenantId?: string, numbers: string[] }  (must be registered)
+app.post('/api/voice/rollover', (req, res) => {
+  const tenantId = (req.body?.tenantId || req.tenantId || 'default').toLowerCase();
+  const numbers = Array.isArray(req.body?.numbers) ? req.body.numbers.map(phoneE164).filter(Boolean) : [];
+  const registered = new Set(listTenantNumbers(tenantId));
+  const bad = numbers.filter(n => !registered.has(n));
+  if (bad.length) return res.status(400).json({ ok: false, error: 'unregistered numbers in list', bad });
+
+  rolloverByTenant.set(tenantId, numbers);
+  res.json({ ok: true, tenantId, rollover: numbers });
+});
+
+// GET rollover list
+app.get('/api/voice/rollover', (req, res) => {
+  const tenantId = (req.query?.tenantId || req.tenantId || 'default').toLowerCase();
+  res.json({ ok: true, tenantId, rollover: Array.from(rolloverByTenant.get(tenantId) || []) });
 });
 
 // --- EMAIL ---
@@ -1071,7 +1261,8 @@ app.post('/api/voice/state', (req, res) => {
 });
 
 // Twilio inbound SMS webhook
-app.post('/twilio/sms', express.urlencoded({ extended: false }), async (req, res) => {
+app.post('/twilio/sms', express.urlencoded({ extended: false }), verifyTwilio(), async (req, res) => {
+
   const { From, Body, To } = req.body || {};
 
   // 🔁 resolve tenant from inbound "To"
@@ -1121,21 +1312,32 @@ app.post('/twilio/sms', express.urlencoded({ extended: false }), async (req, res
   }
 });
 
-app.post('/twilio/voice-status', express.urlencoded({ extended: false }), async (req, res) => {
+
+
+app.post('/twilio/voice-status', express.urlencoded({ extended: false }), verifyTwilio(), async (req, res) => {   
   const { CallSid, CallStatus, From, To, Direction } = req.body || {};
 
-  // 🔁 resolve tenant from inbound "To"
-  req.tenantId = getTenantForPhone(To) || 'default';
+   res.type('text/xml').send('<Response/>');
+ });
+ 
+// Inbound Voice webhook → connect the call to our Media Stream WS
+app.post('/twilio/voice', express.urlencoded({ extended: false }), verifyTwilio(), (req, res) => {
+  const { To } = req.body || {};
+  const tenantId = getTenantForPhone(To) || req.tenantId || 'default';
 
-  emitTenant(req.tenantId, 'voice:status', {
-    sid: CallSid,
-    status: CallStatus,
-    from: From,
-    to: To,
-    dir: Direction,
-    at: new Date().toISOString(),
-  });
-  res.type('text/xml').send('<Response/>');
+  const baseWs = publicWsUrl();
+  const twiml = new twilio.twiml.VoiceResponse();
+
+  if (!baseWs) {
+    twiml.say('Media stream is not configured on the server.');
+    return res.type('text/xml').send(twiml.toString());
+  }
+
+  const connect = twiml.connect();
+  const streamUrl = `${baseWs}${VOICE_WS_PATH}?tenantId=${encodeURIComponent(tenantId)}`;
+  connect.stream({ url: streamUrl, track: 'both_tracks' });
+
+  res.type('text/xml').send(twiml.toString());
 });
 
 // --- Aggregate contacts (manual + jobs memory) ---
@@ -1775,6 +1977,32 @@ app.post('/api/sms/send', async (req, res) => {
       status: e.status || null,
       moreInfo: e.moreInfo || null,
     });
+  }
+});
+
+// --- Read SMS thread for a phone (simple, in-memory) ---
+app.get('/api/sms/thread', (req, res) => {
+  try {
+    const raw = req.query.phone || '';
+    const phone = phoneE164(raw);
+    if (!phone) return res.status(400).json({ ok: false, error: 'phone required' });
+
+    // pull from the shared in-memory log
+    const arr = getThread(phone) || [];
+
+    // normalize a lightweight payload for UIs
+    const items = arr.map((m, i) => ({
+      id: `${phone}:${i}:${m.at}`,
+      dir: m.direction === 'outbound' ? 'out' : 'in',
+      text: m.text || '',
+      at: m.at,
+      to: m.to || null,
+      from: m.from || null,
+    }));
+
+    res.json({ ok: true, phone, items });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.message || 'thread_failed' });
   }
 });
 

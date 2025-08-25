@@ -1,8 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Phone, PhoneCall, Send, X } from 'lucide-react'
 import type { Socket } from 'socket.io-client'
-import { makeSocket, getTenantId, withTenant } from '../lib/socket'
-import { API_BASE } from '../config'
+import { getSocket, getTenantId, withTenant } from '../lib/socket'
 
 type SMS = {
   id: string
@@ -12,8 +11,6 @@ type SMS = {
   to?: string
   from?: string
 }
-
-const API_HTTP_BASE = `${API_BASE}`.endsWith('/api') ? API_BASE : `${API_BASE}/api`
 
 function fmtTime(iso: string) {
   try {
@@ -29,6 +26,14 @@ function normalizePhone(input: string) {
   if (/^\d{10}$/.test(s)) return '+1' + s // US default
   if (/^\d{11}$/.test(s)) return '+' + s
   return s
+}
+
+// same API base strategy used elsewhere (Vite env or window origin)
+function apiBase(): string {
+  const env =
+    (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_API_BASE) || ''
+  if (env) return String(env).replace(/\/$/, '')
+  return (typeof window !== 'undefined' ? window.location.origin : '').replace(/\/$/, '')
 }
 
 export default function PhoneDock() {
@@ -50,23 +55,13 @@ export default function PhoneDock() {
   useEffect(() => { localStorage.setItem('phonedock.feed', JSON.stringify(feed.slice(-300))) }, [feed])
   useEffect(() => { if (open) setUnseen(0) }, [open])
 
-  // socket: connect once (tenant-scoped via makeSocket)
-  const socket = useRef<Socket | null>(null)
+  // socket: reuse singleton for this tenant (no duplicate connections)
+  const socketRef = useRef<Socket | null>(null)
   useEffect(() => {
-    if (socket.current) return
-    const s = makeSocket()
-    socket.current = s
+    const s = getSocket(tenantId)
+    socketRef.current = s
 
-    s.on('connect', () => {
-      // eslint-disable-next-line no-console
-      console.log('[socket] connected', s.id)
-    })
-    s.on('disconnect', (reason) => {
-      // eslint-disable-next-line no-console
-      console.log('[socket] disconnected:', reason)
-    })
-
-    s.on('sms:inbound', (m: any) => {
+    const onInbound = (m: any) => {
       const item: SMS = {
         id: m.sid || crypto.randomUUID(),
         dir: 'in',
@@ -76,9 +71,9 @@ export default function PhoneDock() {
       }
       setFeed((f) => f.concat(item))
       setUnseen((u) => (open ? 0 : Math.min(u + 1, 99)))
-    })
+    }
 
-    s.on('sms:outbound', (m: any) => {
+    const onOutbound = (m: any) => {
       const item: SMS = {
         id: m.sid || crypto.randomUUID(),
         dir: 'out',
@@ -87,14 +82,18 @@ export default function PhoneDock() {
         to: m.to
       }
       setFeed((f) => f.concat(item))
-    })
+    }
+
+    s.on('sms:inbound', onInbound)
+    s.on('sms:outbound', onOutbound)
 
     return () => {
-      s.removeAllListeners()
-      s.disconnect()
-      socket.current = null
+      s.off('sms:inbound', onInbound)
+      s.off('sms:outbound', onOutbound)
+      socketRef.current = null
+      // NOTE: do not disconnect the singleton here
     }
-  }, [open])
+  }, [tenantId, open])
 
   const items = useMemo(() => feed.slice(-300), [feed])
 
@@ -116,7 +115,7 @@ export default function PhoneDock() {
     setText('')
 
     try {
-      const r = await fetch(`${API_HTTP_BASE}/sms/send`, withTenant({
+      const r = await fetch(`${apiBase()}/api/sms/send`, withTenant({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ to: dest, text: body, clientId: tenantId }),
@@ -136,12 +135,27 @@ export default function PhoneDock() {
     }
   }
 
-  function onCall() {
+  async function onCall() {
     const dest = normalizePhone(to)
     if (!dest) return
-    // bridge to Twilio Voice (frontend)
-    window.dispatchEvent(new CustomEvent('voice:dial', { detail: { to: dest } }))
-    setOpen(false)
+    try {
+      // Dial via backend (same path VoiceHUD uses)
+      const r = await fetch(`${apiBase()}/api/voice/call`, {
+        method: 'POST',
+        ...withTenant({ headers: { 'Content-Type': 'application/json' } }),
+        body: JSON.stringify({ to: dest, opts: {} }),
+      })
+      const j = await r.json().catch(() => ({} as any))
+      if (!j?.ok) {
+        // eslint-disable-next-line no-alert
+        alert(`Call failed: ${j?.error || r.status}`)
+      } else {
+        setOpen(false)
+      }
+    } catch (e: any) {
+      // eslint-disable-next-line no-alert
+      alert(`Call failed: ${e?.message || e}`)
+    }
   }
 
   return (

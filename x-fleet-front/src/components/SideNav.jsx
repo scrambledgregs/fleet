@@ -2,7 +2,7 @@
 import { NavLink } from 'react-router-dom'
 import {
   LayoutGrid, Users, Truck, Calendar, Package, BadgeDollarSign,
-  FileText, MessageSquare, Activity, Bot, Settings
+  FileText, MessageSquare, Activity, Bot, Settings, Phone
 } from 'lucide-react'
 
 // ----- UI bits -----
@@ -59,6 +59,7 @@ const SECTIONS = [
     links: [
       { to: '/contacts', label: 'Contacts',   icon: Users },
       { to: '/chatter',  label: 'Messages',   icon: MessageSquare }, // customer messaging
+      { to: '/phones',   label: 'Phones',     icon: Phone },         // call dialer & recordings
       { to: '/team',     label: 'Team Chat',  icon: MessageSquare }, // internal chat
     ],
   },
