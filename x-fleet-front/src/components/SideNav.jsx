@@ -1,11 +1,9 @@
-// src/components/SideNav.jsx
 import { NavLink } from 'react-router-dom'
 import {
   LayoutGrid, Users, Truck, Calendar, Package, BadgeDollarSign,
-  FileText, MessageSquare, Activity, Bot, Settings, Phone
+  FileText, MessageSquare, Activity, Bot, Settings, Phone, Wrench
 } from 'lucide-react'
 
-// ----- UI bits -----
 function LinkRow({ to, end, label, Icon }) {
   return (
     <NavLink
@@ -42,33 +40,39 @@ function LinkRow({ to, end, label, Icon }) {
 
 function SectionLabel({ children }) {
   return (
-    <div className="px-3 pt-3 pb-1 text-[11px] uppercase tracking-[0.12em] text-white/50">
+    <div className="px-3 pt-3 pb-1 text[11px] uppercase tracking-[0.12em] text-white/50">
       {children}
     </div>
   )
 }
 
-// ----- Grouped nav config -----
 const SECTIONS = [
   {
     label: 'Overview',
     links: [{ to: '/', label: 'Dashboard', icon: LayoutGrid, end: true }],
   },
   {
-    label: 'LEADS',
+    label: 'Office',
+    links: [ 
+      { to: '/chatter',  label: 'Messages',   icon: MessageSquare },
+      { to: '/phones',   label: 'Phones',     icon: Phone },
+      { to: '/team',     label: 'Team Chat',  icon: MessageSquare },
+    ],
+  },
+  {
+      label: 'LEADS',
     links: [
       { to: '/contacts', label: 'Contacts',   icon: Users },
-      { to: '/chatter',  label: 'Messages',   icon: MessageSquare }, // customer messaging
-      { to: '/phones',   label: 'Phones',     icon: Phone },         // call dialer & recordings
-      { to: '/team',     label: 'Team Chat',  icon: MessageSquare }, // internal chat
+      { to: '/leads',    label: 'Lead Hub',  icon: Activity },  
     ],
   },
   {
     label: 'Jobs',
     links: [
-      { to: '/jobs',     label: 'Bookings', icon: LayoutGrid },
-      { to: '/calendar', label: 'Calendar', icon: Calendar },
-      { to: '/vehicles', label: 'Fleet',    icon: Truck },
+      { to: '/jobs',     label: 'Bookings',  icon: LayoutGrid },
+      { to: '/calendar', label: 'Calendar',  icon: Calendar },
+      { to: '/vehicles', label: 'Fleet',     icon: Truck },
+      { to: '/jobboard', label: 'Production', icon: Wrench }, // ✅ matches route
     ],
   },
   {

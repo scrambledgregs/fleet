@@ -1,18 +1,32 @@
-// components/JobCard.jsx
+// src/components/JobCard.tsx
+import React, { useMemo } from 'react'
 import { Phone, MapPin, Wrench, Search, Package, User } from 'lucide-react'
-import { useMemo } from 'react'
 import { useForecast } from '../hooks/useForecast'
+import type { Job } from '../types/schedule'
 
-// --- helpers ---
-function formatUSD(n) {
+type JobCardProps = {
+  job: Job
+  paydayThreshold?: number
+  onOpen?: (job: Job) => void
+  onMapClick?: (job: Job) => void
+  isSelected?: boolean
+}
+
+type ForecastDay = { date: string; code?: number; tMax?: number; tMin?: number; popMax?: number }
+type Forecast = { daily?: ForecastDay[] }
+
+/* ------------------------------- helpers -------------------------------- */
+
+function formatUSD(n: number | string | undefined) {
+  const num = Number(n ?? 0)
   return new Intl.NumberFormat(undefined, {
     style: 'currency',
     currency: 'USD',
     maximumFractionDigits: 0,
-  }).format(Number(n) || 0)
+  }).format(Number.isFinite(num) ? num : 0)
 }
 
-function toNumberLoose(v) {
+function toNumberLoose(v: unknown) {
   if (v == null) return 0
   if (typeof v === 'number' && Number.isFinite(v)) return v
   if (typeof v === 'string') {
@@ -23,11 +37,10 @@ function toNumberLoose(v) {
   return 0
 }
 
-// pick the forecast entry closest to the job's start time (avoids TZ off-by-one)
-function pickNearestDaily(wx, startISO) {
+function pickNearestDaily(wx: Forecast | undefined, startISO?: string | null) {
   if (!wx?.daily?.length || !startISO) return null
   const t = new Date(startISO).getTime()
-  let best = null
+  let best: ForecastDay | null = null
   let bestDiff = Infinity
   for (const d of wx.daily) {
     const utcMidnight = Date.parse(d.date)
@@ -38,8 +51,7 @@ function pickNearestDaily(wx, startISO) {
   return best
 }
 
-// Open-Meteo weathercode → emoji
-const codeToEmoji = (c) => {
+const codeToEmoji = (c?: number) => {
   if (c == null) return '❔'
   if ([0].includes(c)) return '☀️'
   if ([1, 2].includes(c)) return '🌤️'
@@ -52,17 +64,19 @@ const codeToEmoji = (c) => {
   return '❔'
 }
 
-function addrToString(a) {
+function addrToString(a: unknown): string {
   if (!a) return ''
   if (typeof a === 'string') return a
+  const anyA = a as any
   const parts = [
-    a.fullAddress || a.full_address,
-    [a.address, a.city, a.state, a.postalCode].filter(Boolean).join(', ')
+    anyA.fullAddress || anyA.full_address,
+    [anyA.address, anyA.city, anyA.state, anyA.postalCode].filter(Boolean).join(', '),
   ].filter(Boolean)
   return parts[0] || ''
 }
 
-function normalizeContact(raw = {}) {
+// normalize contact shape enough for rendering
+function normalizeContact(raw: any = {}) {
   const phonesArr = Array.isArray(raw.phones) ? raw.phones : []
   const emailsArr = Array.isArray(raw.emails) ? raw.emails : []
   const phones = [...phonesArr, raw.phone, raw.mobile, raw.primaryPhone].filter(Boolean)
@@ -75,62 +89,48 @@ function normalizeContact(raw = {}) {
   }
 }
 
-export default function JobCard({
-  job,                      // object from /api/week-appointments
-  paydayThreshold = 2500,
-  onOpen,                   // (job) => void
-  onMapClick,               // (job) => void (optional)
-  isSelected,               // boolean
-}) {
+/* -------------------------------- component ------------------------------ */
 
-    // assigned tech (from /api/week-appointments)
+export default function JobCard({
+  job,
+  paydayThreshold = 2500,
+  onOpen,
+  onMapClick,
+  isSelected,
+}: JobCardProps) {
   const assignedUserId = job?.assignedUserId ?? null
   const assignedRepName = job?.assignedRepName ?? null
   const assignedLabel = assignedRepName ?? (assignedUserId ? `#${assignedUserId}` : 'Unassigned')
 
-  // normalize contact for reliable phones/emails/name
   const c = normalizeContact(job?.contact || {})
 
   const value = useMemo(() => {
     const raw =
       job?.estValue ??
-      job?.est_value ??
-      job?.estimate ??
-      job?.custom?.estValue ??
-      job?.custom?.estimate ??
+      (job as any)?.est_value ??
+      (job as any)?.estimate ??
+      (job as any)?.custom?.estValue ??
+      (job as any)?.custom?.estimate ??
       0
     return toNumberLoose(raw)
   }, [job])
 
   const isPayday = value >= (Number(paydayThreshold) || 0)
 
-  // --- forecast (10-day default) ---
+  // Forecast
   const lat = Number(job?.lat)
   const lng = Number(job?.lng)
-  const { data: wx, error: wxErr } = useForecast(lat, lng, 10)
-
+  const { data: wx, error: wxErr } = useForecast(lat, lng, 10) as { data?: Forecast; error?: unknown }
   if (import.meta.env?.MODE !== 'production') {
-    console.log('JobCard WX params', { id: job?.id, lat, lng, startTime: job?.startTime })
     if (wxErr) console.warn('JobCard WX error:', wxErr)
-    console.log('JobCard WX data', wx)
   }
 
-  const startISO =
-    job?.startTime ||
-    job?.start ||
-    job?.startTimeISO ||
-    job?.start_time ||
-    job?.start_iso ||
-    null
+  // Use normalized field provided by Calendar mapper
+  const startISO = job.startTimeISO
+  const dayWx: ForecastDay | null =
+    startISO ? pickNearestDaily(wx, startISO) : (wx?.daily?.[0] ?? null)
 
-  let dayWx = null
-  if (startISO) dayWx = pickNearestDaily(wx, startISO)
-  else if (wx?.daily?.length) dayWx = wx.daily[0]
-
-  function toF(c) {
-    if (c == null || isNaN(c)) return null
-    return Math.round((c * 9) / 5 + 32)
-  }
+  const toF = (c?: number | null) => (c == null || isNaN(c) ? null : Math.round((c * 9) / 5 + 32))
 
   const travelMin =
     typeof job?.travelMinutesFromPrev === 'number'
@@ -149,8 +149,7 @@ export default function JobCard({
   const TypeIcon =
     job?.jobType === 'Inspection' ? Search : job?.jobType === 'Install' ? Package : Wrench
 
-  const displayAddress =
-    addrToString(job?.address) || addrToString(c.address)
+  const displayAddress = addrToString(job?.address) || addrToString(c.address)
 
   return (
     <div
@@ -163,7 +162,7 @@ export default function JobCard({
       role="button"
       aria-label={`Open job ${job?.id}`}
     >
-      {/* top row: date/time + badges (with weather) */}
+      {/* Top row: date/time + badges (with weather) */}
       <div className="flex items-center justify-between">
         <div className="text-xs text-white/60">
           {job?.day} • {job?.dateText} • {job?.time}
@@ -193,7 +192,7 @@ export default function JobCard({
         </div>
       </div>
 
-      {/* title row */}
+      {/* Title row */}
       <div className="mt-2 flex items-center gap-2">
         <TypeIcon size={16} className="text-white/80" />
         <div className="font-semibold text-white/90 truncate">
@@ -202,13 +201,13 @@ export default function JobCard({
         <div className="ml-auto text-sm">{formatUSD(value)}</div>
       </div>
 
-      {/* address */}
+      {/* Address */}
       <div className="mt-1 flex items-start gap-1.5 text-sm text-white/80">
         <MapPin size={14} className="mt-0.5 opacity-70" />
         <span className="line-clamp-2">{displayAddress || '—'}</span>
       </div>
 
-      {/* chips */}
+      {/* Chips */}
       <div className="mt-2 flex items-center gap-2">
         <span className={`text-xs px-2 py-1 rounded ${travelColor}`}>
           {travelMin == null ? 'No prior travel' : `Travel +${travelMin}m`}
@@ -219,11 +218,11 @@ export default function JobCard({
           </span>
         )}
         <span className="text-xs px-2 py-1 rounded bg-white/10 text-white/80 inline-flex items-center gap-1">
-      <User size={12} /> {assignedLabel}
-    </span>
+          <User size={12} /> {assignedLabel}
+        </span>
       </div>
 
-      {/* footer */}
+      {/* Footer */}
       <div className="mt-3 flex items-center justify-between border-t border-white/10 pt-2">
         <div className="text-xs text-white/70 truncate">
           {c.name || '—'}

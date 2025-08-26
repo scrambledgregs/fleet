@@ -1,4 +1,3 @@
-// x-fleet-front/src/App.tsx
 import { useState, type ReactNode } from 'react'
 import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import AppShell from './layout/AppShell.jsx'
@@ -8,7 +7,7 @@ import Dashboard from './pages/Dashboard'
 import DashboardContent from './pages/DashboardContent.jsx'
 import ContactsPage from './pages/Contacts'
 import VehiclesPage from './pages/Vehicles.jsx'
-import Calendar from './pages/Calendar.jsx'
+import Calendar from './pages/Calendar'
 import Affiliate from './pages/Affiliate.jsx'
 import IndustryPacks from './pages/IndustryPacks.jsx'
 import Estimator from './pages/Estimator'
@@ -23,12 +22,15 @@ import AutomationsPage from './pages/Automations'
 import PhonePage from './pages/PhonePage'
 import RequestAppointment from './pages/RequestAppointment.jsx'
 import VoiceHUD from './components/VoiceHUD'
+import AIHub from './pages/AIHub'
+import JobBoard from './pages/JobBoard'
+import LeadHub from './pages/LeadHub'
+import PricingPage from './pages/PricingPage'
 
-// 🔻 updated: import without extension so it resolves FloatingCTA.tsx
+// import without extension so it resolves FloatingCTA.tsx
 import FloatingCTA from './components/FloatingCTA'
 
-// 🔻 no longer routing directly to InternalChat
-// import InternalChat from './pages/InternalChat'
+// Team hub
 import Team from './pages/Team'
 import TeamFeed from './pages/TeamFeed'
 
@@ -37,10 +39,10 @@ function RequireSetup({ children }: { children: ReactNode }) {
 }
 
 function RouteAwareHUD() {
-  const { pathname } = useLocation();
+  const { pathname } = useLocation()
   // Hide the floating HUD anywhere under /phones
-  if (pathname.startsWith('/phones')) return null;
-  return <VoiceHUD />;
+  if (pathname.startsWith('/phones')) return null
+  return <VoiceHUD />
 }
 
 export default function App() {
@@ -72,21 +74,19 @@ export default function App() {
           <Route path="contacts" element={<ContactsPage />} />
           <Route path="chatter" element={<Chatter />} />
 
-          {/* 🔁 Team hub (chat + directory + feed) */}
+          {/* Team hub */}
           <Route path="team">
             <Route index element={<Team />} />
             <Route path="feed" element={<TeamFeed />} />
           </Route>
-
-          {/* 🔀 Legacy alias: /chat → /team */}
           <Route path="chat" element={<Navigate to="/team" replace />} />
-
-          {/* (Optional) alias to open directory tab directly */}
           <Route path="directory" element={<Navigate to="/team?tab=directory" replace />} />
 
           {/* Other */}
           <Route path="vehicles" element={<VehiclesPage />} />
+          <Route path="leads" element={<LeadHub />} />
           <Route path="calendar" element={<Calendar />} />
+          <Route path="ai" element={<AIHub />} />
           <Route path="packs" element={<IndustryPacks />} />
           <Route path="affiliate" element={<Affiliate />} />
           <Route path="estimator" element={<Estimator />} />
@@ -95,6 +95,14 @@ export default function App() {
           <Route path="events" element={<EventsPage />} />
           <Route path="phones" element={<PhonePage />} />
           <Route path="automations" element={<AutomationsPage />} />
+
+          {/* ✅ Correct path */}
+          <Route path="jobboard" element={<JobBoard />} />
+
+          {/* Handy aliases */}
+          <Route path="production" element={<Navigate to="/jobboard" replace />} />
+          <Route path="board" element={<Navigate to="/jobboard" replace />} />
+
           <Route path="settings" element={<Settings />} />
         </Route>
 
@@ -102,14 +110,14 @@ export default function App() {
         <Route path="/signup" element={<Signup />} />
         <Route path="/onboarding" element={<Onboarding />} />
         <Route path="/requestappointment" element={<RequestAppointment />} />
+        <Route path="/pricing" element={<PricingPage />} />
 
         {/* Fallback */}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
+
       <RouteAwareHUD />
       <FloatingCTA />
-
-      
     </Router>
   )
 }
