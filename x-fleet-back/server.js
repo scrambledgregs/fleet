@@ -665,7 +665,7 @@ app.post('/api/voice/call', async (req, res) => {
 });
 
 // --- Twilio recording status webhook ---
-app.post('/twilio/recording-status', express.urlencoded({ extended: false }), async (req, res) => {
+app.post('/twilio/recording-status', express.urlencoded({ extended: false }),  verifyTwilio(), async (req, res) => {
   try {
     const { CallSid, CallStatus, RecordingSid, RecordingUrl, RecordingStatus, RecordingDuration, Timestamp, To, From } =
       req.body || {};
@@ -1328,6 +1328,12 @@ app.post('/twilio/voice', express.urlencoded({ extended: false }), verifyTwilio(
   const baseWs = publicWsUrl();
   const twiml = new twilio.twiml.VoiceResponse();
 
+  if (!VOICE_AI_ENABLED) {
+    const twiml = new twilio.twiml.VoiceResponse();
+    twiml.say('Sorry, voice is currently unavailable.');
+    return res.type('text/xml').send(twiml.toString());
+  }
+
   if (!baseWs) {
     twiml.say('Media stream is not configured on the server.');
     return res.type('text/xml').send(twiml.toString());
@@ -1778,7 +1784,7 @@ app.get('/api/job/:id', (req, res) => {
     contact: normalizeContact(job.contact || {}),
   };
 
-  res.json({ ok: true, items: out });
+  res.json({ ok: true, job: out });
 });
 
 app.get('/api/debug/calendar', async (req, res) => {

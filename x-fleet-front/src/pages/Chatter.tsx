@@ -1,31 +1,75 @@
-// src/pages/Chatter.jsx
+// src/pages/Chatter.tsx
+import React, { useEffect, useState, useMemo, useRef } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
-import { useEffect, useState, useMemo, useRef } from 'react'
 import { API_BASE } from '../config'
 import EmailDraftComposer from '../components/EmailDraftComposer'
 import { makeSocket, getTenantId, withTenant } from '../lib/socket'
 import { initVoiceClient } from '../lib/voice'
+import {
+  Phone,
+  Plus,
+  Send as SendIcon,
+  Search,
+  Mail,
+  MessageSquare,
+  Bot,            // lucide uses "Bot" (not "Robot")
+  PhoneCall,
+  ChevronDown,
+} from 'lucide-react'
 
-export default function Chatter() {
+type Contact = {
+  id: string | number
+  name?: string
+  phones?: string[]
+  emails?: string[]
+  company?: string
+  address?: string
+}
+
+type MsgMeta = { subject?: string } | null
+
+type ChatMessage = {
+  id: string
+  direction: 'inbound' | 'outbound'
+  channel: 'sms' | 'email'
+  text: string
+  createdAt: string
+  meta?: MsgMeta
+}
+
+type RecordingItem = {
+  id: string
+  url: string | null
+  from: string | null
+  to: string | null
+  durationSec: number | null
+  at: string | null
+  status: string | null
+  recordingSid: string | null
+  callSid: string | null
+}
+
+export default function Chatter(): JSX.Element {
   const { contactId } = useParams()
   const navigate = useNavigate()
 
   // Refs
-  const inputRef = useRef(null)
-  const composerRef = useRef(null)
-  const listRef = useRef(null)      // 👈 scroll this container only
-  const bottomRef = useRef(null)    // kept, but no longer used to scroll the window
+  const inputRef = useRef<HTMLInputElement | null>(null)
+  const composerRef = useRef<HTMLDivElement | null>(null)
+  const listRef = useRef<HTMLDivElement | null>(null)
+  const bottomRef = useRef<HTMLDivElement | null>(null)
+  const viewportRef = useRef<HTMLDivElement | null>(null)
 
   // tenant (shared for sockets + HTTP)
   const tenantId = useMemo(() => getTenantId(), [])
 
   // Measure the composer so we can pad the message list accordingly
-  const [composerHeight, setComposerHeight] = useState(0)
+  const [composerHeight, setComposerHeight] = useState<number>(0)
   useEffect(() => {
     if (!composerRef.current) return
     const ro = new ResizeObserver((entries) => {
       for (const e of entries) {
-        const h = e.target?.offsetHeight || 0
+        const h = (e.target as HTMLElement)?.offsetHeight || 0
         setComposerHeight((prev) => (prev !== h ? h : prev))
       }
     })
@@ -33,65 +77,86 @@ export default function Chatter() {
     return () => ro.disconnect()
   }, [])
 
+  // ---- Viewport fit: make this page exactly fill the visible viewport below any header ----
+  const [vpHeight, setVpHeight] = useState<string>('100dvh')
+  useEffect(() => {
+    const update = () => {
+      const top = viewportRef.current?.getBoundingClientRect().top ?? 0
+      const vh = (window.visualViewport?.height || window.innerHeight) - top
+      setVpHeight(`${Math.max(0, Math.round(vh))}px`)
+    }
+    update()
+    window.addEventListener('resize', update)
+    window.addEventListener('orientationchange', update)
+    window.visualViewport?.addEventListener('resize', update)
+    const raf = requestAnimationFrame(update) // catch late layout
+    return () => {
+      window.removeEventListener('resize', update)
+      window.removeEventListener('orientationchange', update)
+      window.visualViewport?.removeEventListener('resize', update)
+      cancelAnimationFrame(raf)
+    }
+  }, [])
+
   // tenant-scoped socket
   const socket = useMemo(() => makeSocket(), [])
 
   // Voice: bridge window events <-> server socket
- useEffect(() => {
-   if (!socket) return
-   initVoiceClient(socket, tenantId)
-   // cleanup not strictly needed; socket is closed on unmount below
- }, [socket, tenantId])
+  useEffect(() => {
+    if (!socket) return
+    initVoiceClient(socket, tenantId)
+  }, [socket, tenantId])
 
   // conversations (left rail)
-  const [contacts, setContacts] = useState([])
-  const [contactsLoading, setContactsLoading] = useState(false)
-  const [q, setQ] = useState('')
+  const [contacts, setContacts] = useState<Contact[]>([])
+  const [contactsLoading, setContactsLoading] = useState<boolean>(false)
+  const [q, setQ] = useState<string>('')
 
   // chat
-  const [loading, setLoading] = useState(true)
-  const [messages, setMessages] = useState([])
-  const [error, setError] = useState(null)
-  const [sending, setSending] = useState(false)
-  const [text, setText] = useState('')
+  const [loading, setLoading] = useState<boolean>(true)
+  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [error, setError] = useState<string | null>(null)
+  const [sending, setSending] = useState<boolean>(false)
+  const [text, setText] = useState<string>('')
 
   // composer / routing
-  const [to, setTo] = useState('')
-  const [manualId, setManualId] = useState(null)
-  const [autopilot, setAutopilot] = useState(true)
-  const [composerMode, setComposerMode] = useState('sms') // 'sms' | 'email'
+  const [to, setTo] = useState<string>('')
+  const [manualId, setManualId] = useState<string | null>(null)
+  const [autopilot, setAutopilot] = useState<boolean>(true)
+  const [composerMode, setComposerMode] = useState<'sms' | 'email'>('sms')
 
-  // NEW: “From” selector (reads env)
-  const fromChoices = useMemo(() => {
+  // “From” selector (reads env)
+  const fromChoices = useMemo<string[]>(() => {
     const env = (import.meta && import.meta.env) || {}
     const raw =
-      env.VITE_TWILIO_FROM_NUMBERS ||
-      env.VITE_TWILIO_FROM ||
-      '' // comma/space separated or single number
+      (env as any).VITE_TWILIO_FROM_NUMBERS ||
+      (env as any).VITE_TWILIO_FROM ||
+      ''
     return String(raw)
       .split(/[,\s]+/)
-      .map((s) => s.trim())
+      .map((s: string) => s.trim())
       .filter(Boolean)
   }, [])
-  const [fromNum, setFromNum] = useState(fromChoices[0] || '')
+  const [fromNum, setFromNum] = useState<string>(fromChoices[0] || '')
 
   // recordings bucket (local, event-driven)
   const REC_OPEN_KEY = 'chatter-rec-open'
-  const [recOpen, setRecOpen] = useState(() => (localStorage.getItem(REC_OPEN_KEY) ?? '1') === '1')
-  const [recItems, setRecItems] = useState([])
+  const [recOpen, setRecOpen] = useState<boolean>(() => (localStorage.getItem(REC_OPEN_KEY) ?? '1') === '1')
+  const [recItems, setRecItems] = useState<RecordingItem[]>([])
 
   useEffect(() => {
-    function onRec(e) {
-      const d = (e.detail || {})
+    function onRec(e: Event) {
+      const ce = e as unknown as CustomEvent<any>
+      const d = (ce.detail || {}) as Partial<RecordingItem> & { recordingSid?: string; callSid?: string; at?: string }
       const id = d.recordingSid || `${d.callSid || 'call'}:${d.at || Date.now()}`
-      const row = {
+      const row: RecordingItem = {
         id,
         url: d.url || null,
-        from: d.from || null,
-        to: d.to || null,
+        from: (d as any).from || null,
+        to: (d as any).to || null,
         durationSec: typeof d.durationSec === 'number' ? d.durationSec : null,
         at: d.at || new Date().toISOString(),
-        status: d.status || 'completed',
+        status: (d as any).status || 'completed',
         recordingSid: d.recordingSid || null,
         callSid: d.callSid || null,
       }
@@ -101,39 +166,39 @@ export default function Chatter() {
       })
       setRecOpen(true)
     }
-    window.addEventListener('voice:recording-ready', onRec)
-    return () => window.removeEventListener('voice:recording-ready', onRec)
+    window.addEventListener('voice:recording-ready', onRec as EventListener)
+    return () => window.removeEventListener('voice:recording-ready', onRec as EventListener)
   }, [])
   useEffect(() => {
     localStorage.setItem(REC_OPEN_KEY, recOpen ? '1' : '0')
   }, [recOpen])
 
-  const effectiveId = contactId || manualId
+  const effectiveId = contactId ?? manualId ?? undefined
   const contactLabel = contactId || manualId || (to ? `manual:${to}` : '—')
 
   // helpers
-  const normalizePhone = (p) => {
+  const normalizePhone = (p?: string) => {
     if (!p) return ''
     let s = String(p).replace(/[^\d]/g, '')
     if (s.length === 10) s = '1' + s
     if (!s.startsWith('+')) s = '+' + s
     return s
   }
-  const idToPhone = (effective, toField) => {
+  const idToPhone = (effective?: string | null, toField?: string) => {
     if (effective?.startsWith('manual:')) return normalizePhone(effective.slice(7))
     return normalizePhone(toField)
   }
 
-  const pushUnique = (incoming) => {
+  const pushUnique = (incoming: Partial<ChatMessage> & { sid?: string; id?: string; meta?: MsgMeta; from?: string; at?: string; createdAt?: string; direction?: ChatMessage['direction']; channel?: ChatMessage['channel']; text?: string; }) => {
     setMessages((ms) => {
       const id = incoming.sid || incoming.id || `${incoming.direction || 'msg'}_${Date.now()}`
       if (ms.some((x) => x.id === id)) return ms
-      const channel = incoming.channel || (incoming.meta?.subject ? 'email' : 'sms')
+      const channel: 'sms' | 'email' = incoming.channel || (incoming.meta?.subject ? 'email' : 'sms')
       return [
         ...ms,
         {
           id,
-          direction: incoming.direction || (incoming.from ? 'inbound' : 'outbound'),
+          direction: (incoming.direction || (incoming.from ? 'inbound' : 'outbound')) as ChatMessage['direction'],
           channel,
           text: incoming.text ?? '',
           createdAt: incoming.at || incoming.createdAt || new Date().toISOString(),
@@ -152,7 +217,7 @@ export default function Chatter() {
         const r = await fetch(`${API_BASE}/api/contacts?clientId=${encodeURIComponent(tenantId)}`, withTenant())
         const j = await r.json()
         if (!alive) return
-        setContacts(Array.isArray(j.contacts) ? j.contacts : [])
+        setContacts(Array.isArray(j.contacts) ? (j.contacts as Contact[]) : [])
       } catch {
         if (alive) setContacts([])
       } finally {
@@ -184,7 +249,7 @@ export default function Chatter() {
           withTenant()
         )
         const j1 = await r1.json()
-        let convoId = j1?.conversations?.[0]?.id
+        let convoId = j1?.conversations?.[0]?.id as string | undefined
 
         if (!convoId) {
           const r2 = await fetch(`${API_BASE}/api/mock/ghl/send-message`, withTenant({
@@ -192,36 +257,36 @@ export default function Chatter() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               contactId: effectiveId,
-              text: '(test) First message)',
+              text: '(test) First message',
               direction: 'outbound',
               clientId: tenantId,
             }),
           }))
           const j2 = await r2.json()
-          convoId = j2.conversationId
+          convoId = j2.conversationId as string
         }
 
         // fetch + normalize messages
         const r3 = await fetch(
-          `${API_BASE}/api/mock/ghl/conversation/${encodeURIComponent(convoId)}/messages?clientId=${encodeURIComponent(tenantId)}`,
+          `${API_BASE}/api/mock/ghl/conversation/${encodeURIComponent(convoId!)}/messages?clientId=${encodeURIComponent(tenantId)}`,
           withTenant()
         )
         const j3 = await r3.json()
         if (!alive) return
 
-        const base = Array.isArray(j3.messages) ? j3.messages : []
-        const normalized = base.map((m) => ({
+        const base = Array.isArray(j3.messages) ? (j3.messages as any[]) : []
+        const normalized: ChatMessage[] = base.map((m) => ({
           id: m.sid || m.id,
-          direction: m.direction || (m.from ? 'inbound' : 'outbound'),
-          channel: m.channel || (m.meta?.subject ? 'email' : 'sms'),
+          direction: (m.direction || (m.from ? 'inbound' : 'outbound')) as ChatMessage['direction'],
+          channel: (m.channel || (m.meta?.subject ? 'email' : 'sms')) as ChatMessage['channel'],
           text: m.text ?? '',
           createdAt: m.at || m.createdAt || new Date().toISOString(),
-          meta: m.meta || null,
+          meta: (m.meta || null) as MsgMeta,
         }))
 
         setMessages(normalized)
         setError(null)
-      } catch (e) {
+      } catch (e: any) {
         if (alive) setError(e?.message || 'Failed to load conversation')
       } finally {
         if (alive) setLoading(false)
@@ -232,11 +297,11 @@ export default function Chatter() {
 
   // live updates
   useEffect(() => {
-    const onInbound = (m) => {
+    const onInbound = (m: any) => {
       if (m.contactId && effectiveId && m.contactId !== effectiveId) return
       pushUnique({ ...m, direction: 'inbound' })
     }
-    const onOutbound = (m) => {
+    const onOutbound = (m: any) => {
       if (m.contactId && effectiveId && m.contactId !== effectiveId) return
       pushUnique({ ...m, direction: 'outbound' })
     }
@@ -248,19 +313,25 @@ export default function Chatter() {
     }
   }, [socket, effectiveId])
 
-  useEffect(() => () => socket.close(), [socket])
+  // cleanup must return void
+  useEffect(() => {
+    return () => { socket.close() }
+  }, [socket])
 
-  // ✅ Auto-scroll the *list container*, never the window
+  // ----- Guarded Auto-scroll (never yank the page) -----
+  const isNearBottom = (el: HTMLElement, threshold = 140) => {
+    const diff = el.scrollHeight - el.scrollTop - el.clientHeight
+    return diff <= threshold
+  }
   useEffect(() => {
     const el = listRef.current
     if (!el) return
-    // only if content actually overflows (prevents fallback to window scroll)
-    if (el.scrollHeight > el.clientHeight + 2) {
+    if (el.scrollHeight > el.clientHeight + 2 && isNearBottom(el, 140)) {
       el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
     }
   }, [messages, composerHeight])
 
-  // ✅ Focus the SMS input without scrolling the page
+  // Focus the SMS input without scrolling the page
   useEffect(() => {
     if (!effectiveId || !inputRef.current) return
     try {
@@ -271,7 +342,7 @@ export default function Chatter() {
   }, [effectiveId])
 
   // extract email subject/body from stored snippet when meta.subject missing
-  function extractEmailParts(text = '', meta) {
+  function extractEmailParts(text = '', meta?: MsgMeta) {
     if (meta?.subject) return { subject: meta.subject, body: text || '' }
     let subject = ''
     let body = text || ''
@@ -290,9 +361,9 @@ export default function Chatter() {
   }
 
   // ---------- Per-contact AI state ----------
-  const lastFetchedPhoneRef = useRef('')
-  const lastFetchAtRef = useRef({})
-  const autopilotFetchInflight = useRef(false)
+  const lastFetchedPhoneRef = useRef<string>('')
+  const lastFetchAtRef = useRef<Record<string, number>>({})
+  const autopilotFetchInflight = useRef<boolean>(false)
 
   const sanitizePhone = (p = '') => {
     const digits = String(p).replace(/\D/g, '')
@@ -301,7 +372,7 @@ export default function Chatter() {
     return '+' + withCtry
   }
 
-  const fetchAutopilotOnce = async (raw) => {
+  const fetchAutopilotOnce = async (raw?: string) => {
     const phone = sanitizePhone(raw)
     if (!phone || phone.length < 12) return
     const now = Date.now()
@@ -318,21 +389,21 @@ export default function Chatter() {
         withTenant()
       )
       const j = await r.json()
-      if (j?.ok) setAutopilot(!!j.state?.autopilot)
+      if ((j as any)?.ok) setAutopilot(!!(j as any).state?.autopilot)
     } catch {}
     finally { autopilotFetchInflight.current = false }
   }
 
   useEffect(() => {
-    const phoneCandidate = idToPhone(effectiveId, to)
+    const phoneCandidate = idToPhone(effectiveId ?? null, to)
     fetchAutopilotOnce(phoneCandidate)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveId])
 
-  async function handleToggleAutopilot(next) {
+  async function handleToggleAutopilot(next: boolean) {
     if (next === autopilot) return
     setAutopilot(next)
-    const phone = idToPhone(effectiveId, to)
+    const phone = idToPhone(effectiveId ?? null, to)
     if (!phone) return
     try {
       await fetch(`${API_BASE}/api/agent/autopilot`, withTenant({
@@ -343,7 +414,7 @@ export default function Chatter() {
     } catch {}
   }
 
-  async function handleSend(e) {
+  async function handleSend(e: React.FormEvent) {
     e.preventDefault()
     if (!text.trim()) return
     const id = contactId || manualId || (to.trim() ? `manual:${to.trim()}` : null)
@@ -365,13 +436,14 @@ export default function Chatter() {
           clientId: tenantId,
         }),
       }))
-      const j = await r.json().catch(() => ({}))
-      if (!r.ok || j?.ok === false) throw new Error(j?.error || 'Failed to send')
-
+      const j: any = await r.json().catch(() => ({}))
+      if (!r.ok || j?.ok === false) {
+        throw new Error(j?.error || 'Failed to send')
+      }
       setText('')
       setError(null)
       try { inputRef.current?.focus({ preventScroll: true }) } catch {}
-    } catch (err) {
+    } catch (err: any) {
       setError(err.message || 'Send failed')
     } finally {
       setSending(false)
@@ -382,25 +454,42 @@ export default function Chatter() {
     const qq = q.trim().toLowerCase()
     if (!qq) return contacts
     return contacts.filter(c =>
-      c.name?.toLowerCase().includes(qq) ||
-      (c.phones || []).some(p => p?.toLowerCase().includes(qq))
+      (c.name || '').toLowerCase().includes(qq) ||
+      (c.phones || []).some(p => (p || '').toLowerCase().includes(qq))
     )
   }, [contacts, q])
 
-  // --------------------- CONTENT ONLY (AppShell provides the chrome) ---------------------
+  // Fill exactly the visible viewport below the app header.
   return (
-    <div className="grid grid-cols-12 gap-3 h-full min-h-0 overflow-hidden">
+    <div
+      ref={viewportRef}
+      className="grid grid-cols-12 gap-4 min-h-0 overflow-hidden px-3 bg-neutral-950 text-white"
+      style={{ height: vpHeight }}
+    >
       {/* LEFT: Threads */}
-      <div className="col-span-12 md:col-span-3 glass rounded-none p-2 flex flex-col min-h-0">
-        <div className="flex-none">
-          <div className="text-sm font-semibold mb-2">Threads</div>
+      <div className="col-span-12 md:col-span-3 bg-white/5 backdrop-blur-xl rounded-2xl border border-white/10 p-3 flex flex-col h-full min-h-0 overflow-hidden shadow-[0_8px_30px_rgba(0,0,0,0.12)]">
+        <div className="flex items-center justify-between mb-2">
+          <div className="text-sm font-semibold tracking-[-0.01em]">Threads</div>
+          <button
+            onClick={() => { setManualId(null); setTo(''); setMessages([]); setError(null); }}
+            className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-xl border border-white/10 hover:bg-white/10 transition"
+            title="New thread"
+          >
+            <Plus className="w-3.5 h-3.5" /> New
+          </button>
+        </div>
+
+        <div className="flex-none relative mb-2">
+          <Search className="w-4 h-4 absolute left-2 top-2.5 opacity-60 pointer-events-none" />
           <input
             value={q}
             onChange={e => setQ(e.target.value)}
-            placeholder="Search name or phone…"
-            className="w-full bg-black/30 border border-white/10 rounded-none px-2 py-1 text-sm outline-none focus:border-white/30 mb-2"
+            placeholder="Search name or phone"
+            className="w-full bg-black/30 border border-white/10 rounded-xl pl-8 pr-2 py-2 text-sm outline-none focus:border-white/30"
+            aria-label="Search threads"
           />
         </div>
+
         <div className="flex-1 min-h-0 overflow-auto space-y-1 pr-1">
           {contactsLoading && <div className="text-xs text-white/60">Loading…</div>}
           {!contactsLoading && filteredContacts.length === 0 && (
@@ -408,13 +497,13 @@ export default function Chatter() {
           )}
           {filteredContacts.map(c => (
             <button
-              key={c.id}
-              onClick={() => navigate(`/chatter/${encodeURIComponent(c.id)}`)}
+              key={String(c.id)}
+              onClick={() => navigate(`/chatter/${encodeURIComponent(String(c.id))}`)}
               className={
-                "w-full text-left px-2 py-2 rounded-none transition " +
+                "w-full text-left px-3 py-2 rounded-xl transition border " +
                 (String(c.id) === String(contactId)
-                  ? "bg-white/15 border border-white/10"
-                  : "hover:bg-white/10")
+                  ? "bg-white/10 border-white/15 shadow-inner"
+                  : "bg-transparent border-transparent hover:bg-white/5 hover:border-white/10")
               }
             >
               <div className="text-sm font-medium truncate">{c.name || '—'}</div>
@@ -427,55 +516,52 @@ export default function Chatter() {
       </div>
 
       {/* CENTER: Chat */}
-      <div className="col-span-12 md:col-span-6 glass rounded-none p-2 flex flex-col min-h-0 relative">
+      <div className="col-span-12 md:col-span-6 bg-white/5 backdrop-blur-xl rounded-2xl border border-white/10 p-3 flex flex-col h-full min-h-0 relative overflow-hidden shadow-[0_8px_30px_rgba(0,0,0,0.12)]">
         {/* header */}
         <div className="flex-none flex items-center justify-between mb-2">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 min-w-0">
             <div className="text-[11px] text-white/60">Thread</div>
-            <div className="font-mono text-sm">{contactLabel}</div>
+            <div className="font-mono text-sm truncate max-w-[40vw]" title={contactLabel}>{contactLabel}</div>
             <span
               className={
-                "text-[10px] px-1.5 py-0.5 rounded " +
-                (autopilot ? "bg-emerald-600/30 text-emerald-200" : "bg-zinc-600/30 text-zinc-200")
+                "text-[10px] px-2 py-0.5 rounded-full border " +
+                (autopilot ? "bg-emerald-600/20 text-emerald-200 border-emerald-500/20" : "bg-zinc-700/30 text-zinc-200 border-white/10")
               }
+              title="AI Autopilot status"
             >
               {autopilot ? "Autopilot ON" : "Autopilot OFF"}
             </span>
           </div>
 
-          <div className="flex items-center gap-3">
-            <label className="flex items-center gap-2 text-xs text-white/80">
+          <div className="flex items-center gap-2">
+            <label className="flex items-center gap-1.5 text-xs text-white/80 select-none">
               <input
                 type="checkbox"
                 checked={autopilot}
                 onChange={(e) => handleToggleAutopilot(e.target.checked)}
-                disabled={!idToPhone(effectiveId, to)}
+                disabled={!idToPhone(effectiveId ?? null, to)}
+                className="accent-emerald-400"
               />
-              Chat AI (per contact)
+              <Bot className="w-3.5 h-3.5 opacity-80" /> Chat AI
             </label>
 
             <button
-              className="px-2 py-1 rounded-none glass text-[11px]"
-              onClick={() => { setManualId(null); setTo(''); setMessages([]); setError(null); }}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded-xl border border-white/10 text-[11px] hover:bg-white/10"
+              onClick={() => window.dispatchEvent(new CustomEvent('voicehud:open'))}
+              title="Open Voice HUD"
             >
-              New thread
+              <PhoneCall className="w-3.5 h-3.5" /> Call
             </button>
-            <button
-  className="px-2 py-1 rounded-none glass text-[11px]"
-  onClick={() => window.dispatchEvent(new CustomEvent('voicehud:open'))}
-  title="Open Voice HUD"
->
-  Call
-</button>
           </div>
         </div>
 
         {/* messages (bottom padding equals composer height) */}
         <div
-          ref={listRef}  // 👈 make this the scroll container we control
-          className="flex-1 min-h-0 overflow-auto overscroll-contain space-y-2 pr-1 border border-white/10 rounded-none p-2 bg-white/5"
-          style={{ paddingBottom: composerHeight ? composerHeight + 12 : 12 }}
+          ref={listRef}
+          className="flex-1 min-h-0 overflow-auto overscroll-contain space-y-2 pr-1 border border-white/10 rounded-xl p-3 bg-gradient-to-b from-black/20 to-black/10"
+          style={{ paddingBottom: (composerHeight || 56) + 12 }}
           tabIndex={-1}
+          aria-label="Conversation"
         >
           {loading && <div className="text-sm text-white/60">Loading…</div>}
           {error && <div className="text-sm text-red-400">{error}</div>}
@@ -489,28 +575,31 @@ export default function Chatter() {
             const { subject, body } = isEmail ? extractEmailParts(m.text, m.meta) : { subject: "", body: m.text }
 
             return (
-              <div
-                key={m.id}
-                className={
-                  isOut
-                    ? "ml-auto max-w-[75%] rounded-2xl px-3 py-2 shadow-sm bg-gray-900 text-white"
-                    : "mr-auto max-w-[75%] rounded-2xl px-3 py-2 shadow-sm bg-white/10 border border-white/10"
-                }
-              >
-                <div className="text-[10px] uppercase tracking-wide opacity-60 mb-1">
-                  {isEmail ? 'EMAIL' : 'SMS'}
-                </div>
+              <div key={m.id} className={"group w-full flex " + (isOut ? "justify-end" : "justify-start")}>
+                <div
+                  className={
+                    (isOut
+                      ? "ml-auto bg-white text-black"
+                      : "mr-auto bg-white/10 text-white border border-white/10") +
+                    " max-w-[75%] rounded-2xl px-3 py-2 shadow-lg"
+                  }
+                >
+                  <div className="flex items-center gap-2 text-[10px] uppercase tracking-wide opacity-60 mb-1">
+                    {isEmail ? <Mail className="w-3 h-3" /> : <MessageSquare className="w-3 h-3" />}
+                    <span>{isEmail ? 'EMAIL' : 'SMS'}</span>
+                  </div>
 
-                {isEmail && subject && (
-                  <div className="text-xs font-semibold mb-1">{subject}</div>
-                )}
+                  {isEmail && subject && (
+                    <div className="text-xs font-semibold mb-1">{subject}</div>
+                  )}
 
-                <div className="text-sm whitespace-pre-wrap">
-                  {body || <span className="text-white/50">(no text)</span>}
-                </div>
+                  <div className="text-sm whitespace-pre-wrap">
+                    {body || <span className="opacity-50">(no text)</span>}
+                  </div>
 
-                <div className="mt-1 text-[11px] opacity-60">
-                  {new Date(m.createdAt).toLocaleString()}
+                  <div className={"mt-1 text-[11px] opacity-60 " + (isOut ? "text-black/60" : "text-white/70")}>
+                    {new Date(m.createdAt).toLocaleString()}
+                  </div>
                 </div>
               </div>
             )
@@ -519,27 +608,26 @@ export default function Chatter() {
           <div ref={bottomRef} />
         </div>
 
-        {/* Composer overlay: absolute bottom, never pushes content */}
+        {/* Composer overlay: pinned to card edges */}
         <div
           ref={composerRef}
-          className="absolute inset-x-0 bottom-0 z-10 border-t border-white/10 bg-black/40 backdrop-blur-sm p-2"
+          className="absolute inset-x-0 bottom-0 z-10 border-t border-white/10 bg-black/60 backdrop-blur-md p-3 rounded-b-2xl"
         >
           {/* segmented control */}
-          <div className="mb-2 inline-flex overflow-hidden rounded-md border border-white/10">
+          <div className="mb-2 inline-flex overflow-hidden rounded-xl border border-white/10 bg-black/40">
             <button
               onClick={() => setComposerMode('sms')}
-              className={'px-3 py-1.5 text-xs ' + (composerMode === 'sms' ? 'bg-white/10' : 'hover:bg-white/5')}
+              className={'px-3 py-1.5 text-xs inline-flex items-center gap-1 ' + (composerMode === 'sms' ? 'bg-white/10' : 'hover:bg-white/5')}
+              aria-pressed={composerMode === 'sms'}
             >
-              SMS
+              <MessageSquare className="w-3.5 h-3.5" /> SMS
             </button>
             <button
               onClick={() => setComposerMode('email')}
-              className={
-                'px-3 py-1.5 text-xs border-l border-white/10 ' +
-                (composerMode === 'email' ? 'bg-white/10' : 'hover:bg-white/5')
-              }
+              className={'px-3 py-1.5 text-xs inline-flex items-center gap-1 border-l border-white/10 ' + (composerMode === 'email' ? 'bg-white/10' : 'hover:bg-white/5')}
+              aria-pressed={composerMode === 'email'}
             >
-              Email
+              <Mail className="w-3.5 h-3.5" /> Email
             </button>
           </div>
 
@@ -547,50 +635,54 @@ export default function Chatter() {
             <>
               <div className="flex items-center gap-3 flex-wrap">
                 <label className="text-xs text-white/70">From</label>
-                <select
-                  value={fromNum}
-                  onChange={(e) => setFromNum(e.target.value)}
-                  className="w-48 bg-black/30 border border-white/10 rounded-none px-2 py-1 text-sm outline-none focus:border-white/30"
-                >
-                  {fromChoices.length === 0 && <option value="">(env not set)</option>}
-                  {fromChoices.map((n) => (
-                    <option key={n} value={n}>{n}</option>
-                  ))}
-                </select>
+                <div className="relative">
+                  <select
+                    value={fromNum}
+                    onChange={(e) => setFromNum(e.target.value)}
+                    className="appearance-none w-56 bg-black/30 border border-white/10 rounded-xl pl-3 pr-8 py-1.5 text-sm outline-none focus:border-white/30"
+                  >
+                    {fromChoices.length === 0 && <option value="">(env not set)</option>}
+                    {fromChoices.map((n) => (
+                      <option key={n} value={n}>{n}</option>
+                    ))}
+                  </select>
+                  <ChevronDown className="w-4 h-4 absolute right-2 top-2.5 opacity-60 pointer-events-none" />
+                </div>
 
                 <label className="text-xs text-white/70">To</label>
                 <input
                   value={to}
                   onChange={(e) => setTo(e.target.value)}
                   placeholder="+1 555 555 0123"
-                  className="w-48 bg-black/30 border border-white/10 rounded-none px-2 py-1 text-sm outline-none focus:border-white/30"
+                  className="w-56 bg-black/30 border border-white/10 rounded-xl px-3 py-1.5 text-sm outline-none focus:border-white/30"
                 />
 
-                <span className="text-xs text-white/60">
-                  AI Autopilot: <strong>{autopilot ? 'ON' : 'OFF'}</strong>
+                <span className="text-xs text-white/70">
+                  AI Autopilot: <strong className="font-semibold">{autopilot ? 'ON' : 'OFF'}</strong>
                 </span>
               </div>
 
-              <div className="mt-2 flex gap-2">
+              <form onSubmit={handleSend} className="mt-2 flex gap-2">
                 <input
                   ref={inputRef}
                   value={text}
                   onChange={(e) => setText(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter' && !sending && text.trim()) handleSend(e) }}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !sending && text.trim()) handleSend(e) }}
                   placeholder="Type a message…"
-                  className="flex-1 bg-black/30 border border-white/10 rounded-none px-3 py-2 text-sm outline-none focus:border-white/30"
+                  className="flex-1 bg-black/30 border border-white/10 rounded-xl px-3 py-2 text-sm outline-none focus:border-white/30"
+                  aria-label="Type message"
                 />
                 <button
-                  onClick={handleSend}
+                  type="submit"
                   disabled={sending || !text.trim() || (!contactId && !to.trim())}
-                  className="px-3 py-2 rounded-none glass text-sm hover:bg-panel/70 disabled:opacity-50"
+                  className="inline-flex items-center gap-1 px-3 py-2 rounded-xl border border-white/10 hover:bg-white/10 disabled:opacity-50"
                 >
-                  Send
+                  <SendIcon className="w-4 h-4" /> Send
                 </button>
-              </div>
+              </form>
             </>
           ) : (
-            <div className="border border-white/10 rounded-none p-2 bg-neutral-900 max-h-[40vh] overflow-auto shadow-lg">
+            <div className="border border-white/10 rounded-xl p-2 bg-neutral-900 max-h-[40vh] overflow-auto shadow-lg">
               <EmailDraftComposer
                 contactId={effectiveId || null}
                 to={selectedContact?.emails?.[0] || ''}
@@ -599,18 +691,18 @@ export default function Chatter() {
                 defaultContext={`Customer: ${selectedContact?.name || ''}.
 Contact: ${(selectedContact?.phones?.[0] || selectedContact?.emails?.[0] || '')}.
 Write a short, friendly follow-up about their request.`}
-                onQueued={(m) => pushUnique(m)}
+                onQueued={(m) => pushUnique(m as any)}
               />
             </div>
           )}
         </div>
       </div>
 
-      {/* RIGHT: Details (kept minimal; can slide-over later) */}
-      <div className="col-span-12 md:col-span-3 glass rounded-none p-2 flex flex-col min-h-0 overflow-auto">
+      {/* RIGHT: Details + Recent Calls */}
+      <div className="col-span-12 md:col-span-3 bg-white/5 backdrop-blur-xl rounded-2xl border border-white/10 p-3 flex flex-col h-full min-h-0 overflow-hidden shadow-[0_8px_30px_rgba(0,0,0,0.12)]">
         <div className="text-sm font-semibold mb-2">Details</div>
         {selectedContact ? (
-          <div className="space-y-2 text-sm">
+          <div className="space-y-2 text-sm min-h-0 overflow-auto pr-1">
             <div className="text-base font-semibold">{selectedContact.name}</div>
             {selectedContact.company && <div className="text-white/70">{selectedContact.company}</div>}
             {(selectedContact.phones?.[0] || selectedContact.emails?.[0]) && (
@@ -623,15 +715,15 @@ Write a short, friendly follow-up about their request.`}
             )}
             <div className="pt-2 flex gap-2">
               {selectedContact.phones?.[0] && (
-                <a href={`tel:${selectedContact.phones[0]}`} className="px-2 py-1 rounded-none glass text-xs">
-                  Call Now
+                <a href={`tel:${selectedContact.phones[0]}`} className="px-2 py-1 rounded-xl border border-white/10 hover:bg-white/10 text-xs inline-flex items-center gap-1">
+                  <Phone className="w-3.5 h-3.5" /> Call Now
                 </a>
               )}
-              <Link to="/requestappointment" className="px-2 py-1 rounded-none glass text-xs">
+              <Link to="/requestappointment" className="px-2 py-1 rounded-xl border border-white/10 hover:bg-white/10 text-xs">
                 New Job
               </Link>
               <button
-                className="px-2 py-1 rounded-none glass text-xs"
+                className="px-2 py-1 rounded-xl border border-white/10 hover:bg-white/10 text-xs"
                 onClick={() => setComposerMode(m => (m === 'email' ? 'sms' : 'email'))}
               >
                 {composerMode === 'email' ? 'SMS…' : 'Email…'}
@@ -641,13 +733,32 @@ Write a short, friendly follow-up about their request.`}
         ) : (
           <div className="text-xs text-white/60">Pick a thread to see contact details.</div>
         )}
+
+        {/* RECENT CALLS (collapsible) */}
+        <div className="mt-4">
+          <button
+            onClick={() => setRecOpen(v => !v)}
+            className="w-full text-left text-sm font-semibold flex items-center justify-between px-3 py-2 rounded-xl border border-white/10 hover:bg-white/10"
+          >
+            <span className="inline-flex items-center gap-2"><Phone className="w-4 h-4" /> Recent Calls</span>
+            <ChevronDown className={'w-4 h-4 transition-transform ' + (recOpen ? 'rotate-180' : '')} />
+          </button>
+          {recOpen && (
+            <div className="mt-2 space-y-2 min-h-0 overflow-auto pr-1">
+              {recItems.length === 0 && (
+                <div className="text-xs text-white/60 px-1">No recordings yet.</div>
+              )}
+              {recItems.map(item => <RecordingRow key={item.id} item={item} />)}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   )
 }
 
 /** --- Small recording row component --- */
-function RecordingRow({ item }) {
+function RecordingRow({ item }: { item: RecordingItem }) {
   const who = [item.from, '→', item.to].filter(Boolean).join(' ') || 'Call'
   const when = (() => {
     const d = item.at ? new Date(item.at) : new Date()
@@ -660,7 +771,7 @@ function RecordingRow({ item }) {
   })()
   const dur = typeof item.durationSec === 'number' ? `${Math.round(item.durationSec)}s` : '—'
   return (
-    <div className="px-3 py-2 rounded-lg bg-black/30 border border-white/10">
+    <div className="px-3 py-2 rounded-xl bg-black/30 border border-white/10">
       <div className="flex items-center justify-between text-xs">
         <div className="text-white/80 truncate">{who}</div>
         <div className="text-white/50 ml-2 whitespace-nowrap">{when}</div>

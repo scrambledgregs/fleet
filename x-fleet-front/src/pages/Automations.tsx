@@ -1,8 +1,8 @@
 // src/pages/Automations.tsx
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useState, useRef } from 'react'
 import {
   MessageSquare, CalendarCheck, Star, Clock, Send, Sparkles,
-  Phone, Mail, Loader2, Trash2, Filter, PlusCircle, Wand2
+  Phone, Mail, Trash2, Filter, PlusCircle, Wand2
 } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 import NurtureDesigner from '../components/NurtureDesigner'
@@ -27,6 +27,7 @@ type ApiListResp = { ok: true; items: Automation[] } | { ok: false; error: strin
 type ApiOneResp  = { ok: true; item: Automation }   | { ok: false; error: string }
 
 const TEMPLATES = [
+  // 1) New lead
   {
     key: 'lead-instant-reply',
     Icon: MessageSquare,
@@ -44,33 +45,54 @@ const TEMPLATES = [
           "We got your request and will text you shortly with times.\n" +
           "— {user.name}",
       },
-      meta: { category: 'new-lead' },
+      meta: { category: 'new-lead', step: 10 },
     }),
   },
+
+  // 2) Follow-up if no response
   {
-    key: 'dispo-followup',
+    key: 'lead-followup-no-response',
     Icon: Send,
-    title: 'Disposition follow-up',
-    blurb: 'Nudge after “Estimate Sent”.',
+    title: 'Lead follow-up (no reply)',
+    blurb: 'Nudge if a new lead hasn’t replied.',
     make: (): Omit<Automation, 'id'> => ({
-      title: 'Follow-up after disposition “Estimate Sent”',
+      title: 'Follow-up if lead hasn’t responded',
       enabled: true,
-      trigger: {
-        kind: 'event',
-        event: 'disposition.recorded',
-        match: { disposition: 'estimate_sent' },
-        delayMinutes: 60 * 24,
-      },
+      trigger: { kind: 'event', event: 'lead.no_response', delayMinutes: 60 },
       action: {
         kind: 'sms',
         to: 'contact',
         text:
-          "Hi {contact.firstName}, checking in on the estimate we sent.\n" +
-          "Any questions, or would you like us to schedule? — {user.name}",
+          "Hi {contact.firstName}—just circling back. Want to grab a time?\n" +
+          "Reply 1 for today, 2 for tomorrow. — {user.name}",
       },
-      meta: { category: 'disposition' },
+      meta: { category: 'new-lead', step: 20 },
     }),
   },
+
+  // 3) Booking intro (introduce rep)
+  {
+    key: 'booking-intro',
+    Icon: MessageSquare,
+    title: 'Booking intro',
+    blurb: 'Introduce the assigned rep after booking.',
+    make: (): Omit<Automation, 'id'> => ({
+      title: 'Intro assigned rep after booking',
+      enabled: true,
+      trigger: { kind: 'event', event: 'appointment.created' },
+      action: {
+        kind: 'sms',
+        to: 'contact',
+        text:
+          "You’re booked for {appointment.date} at {appointment.time}.\n" +
+          "Meet {assignee.name} ({assignee.role}). {assignee.bio}\n" +
+          "{assignee.photoUrl}",
+      },
+      meta: { category: 'appointment', step: 30 },
+    }),
+  },
+
+  // 4) Appointment reminder
   {
     key: 'appt-reminder',
     Icon: CalendarCheck,
@@ -87,9 +109,121 @@ const TEMPLATES = [
           "Reminder: we’re scheduled {appointment.date} at {appointment.time}.\n" +
           "Reply 1 to confirm or 2 to reschedule.",
       },
-      meta: { category: 'appointment' },
+      meta: { category: 'appointment', step: 40 },
     }),
   },
+
+  // 5) Dispatch on-the-way
+  {
+    key: 'dispatch-otw',
+    Icon: Send,
+    title: 'Dispatching Notifications',
+    blurb: 'Text when rep is en-route.',
+    make: (): Omit<Automation, 'id'> => ({
+      title: 'Tech en-route / On-the-way',
+      enabled: true,
+      trigger: { kind: 'event', event: 'dispatch.enroute' },
+      action: {
+        kind: 'sms',
+        to: 'contact',
+        text:
+          "{assignee.name} is on the way. ETA {dispatch.eta}.\n" +
+          "{assignee.photoUrl}",
+      },
+      meta: { category: 'appointment', step: 50 },
+    }),
+  },
+
+  // 6) Estimate follow-up
+  {
+    key: 'estimate-followup',
+    Icon: Send,
+    title: 'Estimate follow-up',
+    blurb: 'Follow up after sending estimate.',
+    make: (): Omit<Automation, 'id'> => ({
+      title: 'Estimate follow-up (24h)',
+      enabled: true,
+      trigger: { kind: 'event', event: 'estimate.sent', delayMinutes: 60 * 24 },
+      action: {
+        kind: 'sms',
+        to: 'contact',
+        text:
+          "Hi {contact.firstName}, any questions on the estimate?\n" +
+          "Want us to hold a time? — {user.name}",
+      },
+      meta: { category: 'estimate', step: 60 },
+    }),
+  },
+
+  // 7) Disposition follow-up
+  {
+    key: 'dispo-followup',
+    Icon: Send,
+    title: 'Disposition follow-up',
+    blurb: 'Automatically reply to the disposition if they decline the estimate.',
+    make: (): Omit<Automation, 'id'> => ({
+      title: 'Follow-up after disposition “Estimate Sent”',
+      enabled: true,
+      trigger: {
+        kind: 'event',
+        event: 'disposition.recorded',
+        match: { disposition: 'estimate_sent' },
+        delayMinutes: 60 * 24,
+      },
+      action: {
+        kind: 'sms',
+        to: 'contact',
+        text:
+          "Hi {contact.firstName}, checking in on the estimate we sent.\n" +
+          "Any questions, or would you like us to schedule? — {user.name}",
+      },
+      meta: { category: 'disposition', step: 70 },
+    }),
+  },
+
+  // 8) Invoice reminder
+  {
+    key: 'invoice-reminder',
+    Icon: Clock,
+    title: 'Invoice reminder',
+    blurb: 'Remind after invoice sent (unpaid).',
+    make: (): Omit<Automation, 'id'> => ({
+      title: 'Invoice reminder (3 days)',
+      enabled: true,
+      trigger: { kind: 'event', event: 'invoice.sent', delayMinutes: 60 * 24 * 3 },
+      action: {
+        kind: 'sms',
+        to: 'contact',
+        text:
+          "Friendly reminder: your invoice {invoice.number} is open.\n" +
+          "{invoice.payUrl}",
+      },
+      meta: { category: 'billing', step: 80 },
+    }),
+  },
+
+  // 9) NPS request
+  {
+    key: 'nps-request',
+    Icon: Star,
+    title: 'NPS request',
+    blurb: 'Ask 0–10, branch later.',
+    make: (): Omit<Automation, 'id'> => ({
+      title: 'NPS survey after job',
+      enabled: true,
+      trigger: { kind: 'event', event: 'job.completed', delayMinutes: 60 * 6 },
+      action: {
+        kind: 'sms',
+        to: 'contact',
+        text:
+          "Quick Q: How likely are you to recommend us? 0–10\n" +
+          "Reply with a number.",
+      },
+      meta: { category: 'nps', step: 90 },
+    }),
+  },
+
+  // 10) Review & referral
   {
     key: 'review-referral',
     Icon: Star,
@@ -107,9 +241,11 @@ const TEMPLATES = [
           "If we earned it, would you mind leaving a quick review? {links.review}\n" +
           "Know someone who needs us? Share this link: {links.referral}",
       },
-      meta: { category: 'reviews' },
+      meta: { category: 'reviews', step: 100 },
     }),
   },
+
+  // 11) Annual nurture (long-tail)
   {
     key: 'annual-nurture',
     Icon: Clock,
@@ -129,11 +265,36 @@ const TEMPLATES = [
           "We also have seasonal tune-up specials.\n\n" +
           "Best,\n{user.name}",
       },
-      meta: { category: 'nurture' },
+      meta: { category: 'nurture', step: 110 },
     }),
   },
 ] as const
 
+const BLUEPRINTS: {
+  id: string
+  title: string
+  blurb: string
+  includes: Array<typeof TEMPLATES[number]['key']>
+}[] = [
+  {
+    id: 'speed-to-lead',
+    title: 'Speed-to-Lead Starter',
+    blurb: 'Instant reply + no-response nudge + appt. reminder.',
+    includes: ['lead-instant-reply', 'lead-followup-no-response', 'appt-reminder'],
+  },
+  {
+    id: 'booking-and-dispatch',
+    title: 'Booking & On-My-Way',
+    blurb: 'Rep intro after booking + on-the-way text.',
+    includes: ['booking-intro', 'dispatch-otw'],
+  },
+  {
+    id: 'close-and-grow',
+    title: 'Close & Grow',
+    blurb: 'Estimate follow-up, disposition, invoice, NPS → reviews, annual nurture.',
+    includes: ['estimate-followup', 'dispo-followup', 'invoice-reminder', 'nps-request', 'review-referral', 'annual-nurture'],
+  },
+]
 type Tab = 'overview' | 'gallery' | 'rules' | 'nurture' | 'ai' | 'logs'
 
 export default function AutomationsPage() {
@@ -171,7 +332,7 @@ export default function AutomationsPage() {
   const [savingKey, setSavingKey] = useState<string | null>(null)
   const [q, setQ] = useState('')
   const [preview, setPreview] = useState<Automation | null>(null)
-  const [dryRunBusy, setDryRunBusy] = useState(false)
+  const [previewStartEditing, setPreviewStartEditing] = useState(false)
 
   // light filters
   const [cat, setCat] = useState<'all' | string>('all')
@@ -193,6 +354,19 @@ export default function AutomationsPage() {
   }
   useEffect(() => { load() }, [])
 
+  useEffect(() => {
+    const openId = searchParams.get('open')
+    if (!openId) return
+    const item = items.find(i => i.id === openId)
+    if (item) {
+      setPreview(item)
+      // Clean up the URL so refreshes don’t keep reopening
+      const next = new URLSearchParams(searchParams)
+      next.delete('open')
+      setSearchParams(next, { replace: true })
+    }
+  }, [items, searchParams, setSearchParams])
+
   async function createFromTemplate(key: string) {
     const t = TEMPLATES.find(x => x.key === key)
     if (!t) return
@@ -206,14 +380,56 @@ export default function AutomationsPage() {
       const j: ApiOneResp = await r.json()
       if (!('ok' in j) || !j.ok) throw new Error((j as any).error || 'Create failed')
       setItems(prev => [j.item, ...prev])
-      setPreview(j.item) // show what they just added
+
+      // Navigate to Rules and request the drawer to open (resilient to remounts)
+      const next = new URLSearchParams(searchParams)
+      next.set('tab', 'rules')
+      next.set('open', j.item.id)
+      setSearchParams(next, { replace: true })
+
+      // Also set local state so it opens immediately if the component doesn't remount
+      setPreview(j.item)
       setTab('rules')
     } catch (e) {
-      console.error(e)
-      alert('Failed to create automation.')
+      console.error('POST /api/automations failed; using local fallback', e)
+      // Fallback for dev: create a local temp item so the preview drawer can open
+      const t = TEMPLATES.find(x => x.key === key)
+      if (t) {
+        const tmp: Automation = {
+          id: `tmp_${Date.now()}`,
+          ...t.make(),
+          lastRunAt: null,
+          runs: 0,
+        }
+        setItems(prev => [tmp, ...prev])
+        setPreview(tmp)       // open the drawer for the item we "added"
+        setTab('rules')
+      } else {
+        alert('Failed to create automation.')
+      }
     } finally {
       setSavingKey(null)
     }
+  }
+
+  async function createBlueprint(keys: string[]) {
+    // create sequentially to keep UX/order predictable
+    for (const k of keys) {
+      await createFromTemplate(k)
+    }
+    setTab('rules')
+  }
+
+  async function patchAutomation(id: string, patch: Partial<Automation>) {
+    const r = await fetch(`/api/automations/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    })
+    const j: ApiOneResp = await r.json()
+    if (!('ok' in j) || !j.ok) throw new Error((j as any).error || 'Update failed')
+    setItems(prev => prev.map(x => (x.id === id ? j.item : x)))
+    setPreview(j.item) // keep drawer in sync with the saved version
   }
 
   // Create from RuleBuilder
@@ -273,15 +489,12 @@ export default function AutomationsPage() {
   }
 
   async function dryRun(a: Automation) {
-    setDryRunBusy(true)
     try {
       const r = await fetch(`/api/automations/${encodeURIComponent(a.id)}/dry-run`, { method: 'POST' })
       if (r.ok) alert('Sent a test to your user contact (if configured).')
       else alert('Test sent (simulated). Wire /dry-run for full behavior.')
     } catch {
       alert('Could not send test.')
-    } finally {
-      setDryRunBusy(false)
     }
   }
 
@@ -308,7 +521,7 @@ export default function AutomationsPage() {
 
   const filtered = useMemo(() => {
     const qq = q.trim().toLowerCase()
-    return items
+    const arr = items
       .filter(a => (status==='all') ? true : status==='active' ? a.enabled : !a.enabled)
       .filter(a => (cat==='all') ? true : (a.meta?.category || 'custom') === cat)
       .filter(a =>
@@ -317,7 +530,32 @@ export default function AutomationsPage() {
         JSON.stringify(a.trigger).toLowerCase().includes(qq) ||
         JSON.stringify(a.action).toLowerCase().includes(qq)
       )
+
+    // sort by our journey order, then by title as a stable tiebreaker
+    return arr.sort((a, b) => {
+      const wa = journeyWeight(a), wb = journeyWeight(b)
+      return wa === wb ? (a.title || '').localeCompare(b.title || '') : wa - wb
+    })
   }, [items, q, cat, status])
+
+  function journeyWeight(a: Automation): number {
+    if (typeof a.meta?.step === 'number') return a.meta.step
+
+    const e = (a.trigger as any)?.event || ''
+    const t = (a.title || '').toLowerCase()
+
+    if (e === 'lead.created') return 10
+    if (e === 'lead.no_response') return 20
+    if (e === 'appointment.created') return t.includes('intro') ? 30 : 40
+    if (e === 'dispatch.enroute') return 50
+    if (e === 'estimate.sent') return 60
+    if (e === 'disposition.recorded') return 70
+    if (e === 'invoice.sent') return 80
+    if (e === 'job.completed') return t.includes('nps') ? 90 : 100
+    if ((a.meta?.category || '') === 'nurture') return 110
+
+    return 999 // unknowns go to the end
+  }
 
   return (
     <div className="relative space-y-4">
@@ -378,6 +616,42 @@ export default function AutomationsPage() {
       {/* GALLERY */}
       {tab === 'gallery' && (
         <>
+          {/* Blueprints */}
+          <div className="text-xs text-white/60 mb-2">Blueprints</div>
+          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-6">
+            {BLUEPRINTS.map(bp => (
+              <div
+                key={bp.id}
+                className="p-4 rounded-2xl border border-white/10 bg-white/[0.04]"
+              >
+                <div className="font-semibold">{bp.title}</div>
+                <div className="text-sm text-white/70 mt-0.5">{bp.blurb}</div>
+
+                {/* tiny chips of what's included */}
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {bp.includes.map(k => {
+                    const t = TEMPLATES.find(x => x.key === k)!
+                    return (
+                      <span key={k} className="text-[11px] px-2 py-0.5 rounded-full bg-white/5 border border-white/10">
+                        {t.title}
+                      </span>
+                    )
+                  })}
+                </div>
+
+                <div className="mt-3">
+                  <button
+                    onClick={() => createBlueprint(bp.includes)}
+                    className="inline-flex items-center gap-1 text-sm px-3 py-1.5 rounded-full border border-white/10 hover:border-white/20"
+                  >
+                    Add bundle <span aria-hidden>→</span>
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Recommended */}
           <div className="text-xs text-white/60 mb-2">Recommended</div>
           <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {TEMPLATES.map(t => (
@@ -492,7 +766,12 @@ export default function AutomationsPage() {
                   {/* title */}
                   <button className="px-3 py-2 text-left" onClick={() => setPreview(a)} title="Open preview">
                     <div className="font-medium truncate">{a.title}</div>
-                    <div className="text-xs text-white/60">{a.meta?.category || 'custom'}</div>
+                    <div className="text-xs text-white/60 flex items-center gap-2">
+                      <span>{a.meta?.category || 'custom'}</span>
+                      <span className="text-[11px] px-2 py-0.5 rounded-full bg-white/5 border border-white/10">
+                        to: {(a.action as any).to || 'contact'}
+                      </span>
+                    </div>
                   </button>
 
                   {/* when */}
@@ -523,6 +802,13 @@ export default function AutomationsPage() {
                   {/* controls */}
                   <div className="px-3 py-2 flex items-center gap-2">
                     <ActiveToggle value={a.enabled} onChange={(v) => toggleEnabledOptimistic(a, v)} />
+                    <button
+                      onClick={() => { setPreview(a); setPreviewStartEditing(true) }}
+                      className="text-xs px-2 py-1 border border-white/15 bg-white/5 hover:bg-white/10 rounded-none"
+                      title="Quick edit"
+                    >
+                      Edit
+                    </button>
                     <button
                       onClick={() => setTestItem(a)}   // ← open Test drawer
                       className="text-xs px-2 py-1 border border-white/15 bg-white/5 hover:bg-white/10 rounded-none"
@@ -565,7 +851,15 @@ export default function AutomationsPage() {
         </div>
       )}
 
-      {preview && <PreviewDrawer a={preview} onClose={() => setPreview(null)} />}
+      {preview && (
+        <PreviewDrawer
+          a={preview}
+          onClose={() => { setPreview(null); setPreviewStartEditing(false) }}
+          onSave={patchAutomation}
+          onOpenTest={() => preview && setTestItem(preview)}
+          startEditing={previewStartEditing}
+        />
+      )}
 
       {/* Slide-over: RuleBuilder */}
       {showBuilder && (
@@ -609,6 +903,30 @@ export default function AutomationsPage() {
 /* ---------- helpers & small views ---------- */
 
 function truncate(s: string, n: number) { return !s ? '' : s.length > n ? s.slice(0, n - 1) + '…' : s }
+
+// Rough SMS length/segment calculator.
+// NOTE: This is an approximation: if any char code > 127 we treat as UCS-2.
+
+function smsParts(text: string): {
+  encoding: 'GSM-7' | 'UCS-2';
+  length: number;
+  segments: number;
+  perSegment: number;
+} {
+  const length = [...text].length; // count codepoints
+  const isUCS2 = [...text].some(ch => (ch.codePointAt(0) ?? 0) > 127);
+  if (length === 0) return { encoding: 'GSM-7', length: 0, segments: 0, perSegment: 160 };
+
+  if (isUCS2) {
+    const per1 = 70, perN = 67;
+    const segments = length <= per1 ? 1 : Math.ceil(length / perN);
+    return { encoding: 'UCS-2', length, segments, perSegment: segments === 1 ? per1 : perN };
+  } else {
+    const per1 = 160, perN = 153;
+    const segments = length <= per1 ? 1 : Math.ceil(length / perN);
+    return { encoding: 'GSM-7', length, segments, perSegment: segments === 1 ? per1 : perN };
+  }
+}
 
 function ActiveToggle({ value, onChange }: { value: boolean; onChange:(v:boolean)=>void }) {
   const [v, setV] = useState(value)
@@ -679,8 +997,61 @@ function nextOccurrences(trigger: Automation['trigger'], count = 3): string[] {
   }
 }
 
-function PreviewDrawer({ a, onClose }: { a: Automation; onClose: () => void }) {
+function PreviewDrawer({
+  a,
+  onClose,
+  onSave,
+  onOpenTest,
+  startEditing = false,
+}: {
+  a: Automation
+  onClose: () => void
+  onSave: (id: string, patch: Partial<Automation>) => Promise<void>
+  onOpenTest: () => void
+  startEditing?: boolean
+}) {
+
   const isSMS = a.action.kind === 'sms'
+  const [editing, setEditing] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const editorRef = useRef<HTMLTextAreaElement | HTMLInputElement | null>(null)
+  useEffect(() => { if (editing && editorRef.current) editorRef.current.focus() }, [editing])
+
+  // drafts
+  const [draftBody, setDraftBody] = useState(
+    isSMS ? (a.action as any).text : (a.action as any).body
+  )
+  const [draftSubject, setDraftSubject] = useState(
+    a.action.kind === 'email' ? (a.action as any).subject : ''
+  )
+  const smsStats = isSMS ? smsParts(draftBody) : null
+
+  // reset drafts when switching items
+  useEffect(() => {
+    const sms = a.action.kind === 'sms'
+    setDraftBody(sms ? (a.action as any).text : (a.action as any).body)
+    setDraftSubject(!sms ? (a.action as any).subject : '')
+    setEditing(startEditing)
+  }, [a.id, startEditing])
+
+  async function save() {
+    try {
+      setBusy(true)
+      if (a.action.kind === 'sms') {
+        await onSave(a.id, { action: { ...a.action, text: draftBody } as any })
+      } else {
+        await onSave(a.id, {
+          action: { ...a.action, subject: draftSubject, body: draftBody } as any,
+        })
+      }
+      setEditing(false)
+    } catch (e: any) {
+      alert(e?.message || 'Save failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div className="fixed top-0 right-0 h-full w-[min(460px,90vw)] bg-neutral-950/95 backdrop-blur border-l border-white/10 shadow-2xl z-40" role="dialog" aria-label="Automation preview">
       <div className="p-3 border-b border-white/10 flex items-center justify-between">
@@ -688,7 +1059,34 @@ function PreviewDrawer({ a, onClose }: { a: Automation; onClose: () => void }) {
           <Sparkles size={14} className="opacity-80" />
           <div className="font-medium truncate">{a.title}</div>
         </div>
-        <button onClick={onClose} className="text-xs px-2 py-1 border border-white/15 bg-white/5 hover:bg-white/10 rounded-none">Close</button>
+        <div className="flex items-center gap-2">
+          {!editing ? (
+            <button
+              onClick={() => setEditing(true)}
+              className="text-xs px-2 py-1 border border-white/15 bg-white/5 hover:bg-white/10 rounded-none"
+            >
+              Edit
+            </button>
+          ) : (
+            <>
+              <button
+                onClick={() => setEditing(false)}
+                className="text-xs px-2 py-1 border border-white/15 bg-white/5 hover:bg-white/10 rounded-none"
+                disabled={busy}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={save}
+                className="text-xs px-2 py-1 border border-white/15 bg-white/10 hover:bg-white/20 rounded-none"
+                disabled={busy}
+              >
+                {busy ? 'Saving…' : 'Save'}
+              </button>
+            </>
+          )}
+          <button onClick={onClose} className="text-xs px-2 py-1 border border-white/15 bg-white/5 hover:bg-white/10 rounded-none">Close</button>
+        </div>
       </div>
 
       <div className="p-3 space-y-3 text-sm">
@@ -706,26 +1104,106 @@ function PreviewDrawer({ a, onClose }: { a: Automation; onClose: () => void }) {
         </div>
 
         <div className="mt-2 border border-white/10 bg-white/5 rounded-2xl p-3">
-          {a.action.kind === 'sms' ? (
-            <div className="space-y-2">
-              <div className="text-[10px] uppercase tracking-wide opacity-60 mb-1">Preview</div>
-              <div className="ml-auto max-w-[85%] rounded-2xl px-3 py-2 shadow-sm bg-gray-900 text-white whitespace-pre-wrap">
-                {(a.action as any).text}
+          {!editing ? (
+            // read-only preview
+            isSMS ? (
+              <div className="space-y-2">
+                <div className="text-[10px] uppercase tracking-wide opacity-60 mb-1">Preview</div>
+                <div className="ml-auto max-w-[85%] rounded-2xl px-3 py-2 shadow-sm bg-gray-900 text-white whitespace-pre-wrap">
+                  {(a.action as any).text}
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="space-y-2">
+                <div className="text-[10px] uppercase tracking-wide opacity-60 mb-1">Preview</div>
+                <div className="font-semibold">{(a.action as any).subject}</div>
+                <div className="rounded-2xl px-3 py-2 shadow-sm bg-gray-900 text-white whitespace-pre-wrap">
+                  {(a.action as any).body}
+                </div>
+              </div>
+            )
           ) : (
+            // editor
             <div className="space-y-2">
-              <div className="text-[10px] uppercase tracking-wide opacity-60 mb-1">Preview</div>
-              <div className="font-semibold">{(a.action as any).subject}</div>
-              <div className="rounded-2xl px-3 py-2 shadow-sm bg-gray-900 text-white whitespace-pre-wrap">
-                {(a.action as any).body}
+              {a.action.kind === 'email' && (
+                <label className="block text-xs">
+                  Subject
+                  <input
+                    ref={editorRef as React.RefObject<HTMLInputElement>}
+                    value={draftSubject}
+                    onChange={e => setDraftSubject(e.target.value)}
+                    className="w-full mt-1 px-2 py-1 bg-black/30 border border-white/10 rounded-none text-sm"
+                  />
+                </label>
+              )}
+              <label className="block text-xs">
+                {a.action.kind === 'sms' ? 'Message' : 'Body'}
+                <textarea
+                  ref={a.action.kind === 'sms' ? (editorRef as React.RefObject<HTMLTextAreaElement>) : undefined}
+                  rows={6}
+                  value={draftBody}
+                  onChange={e => setDraftBody(e.target.value)}
+                  className="w-full mt-1 px-2 py-1 bg-black/30 border border-white/10 rounded-none text-sm font-mono"
+                />
+                {a.action.kind === 'sms' && smsStats && (
+                  <div className="text-[11px] text-white/60">
+                    {smsStats.segments === 1
+                      ? `${smsStats.length} / ${smsStats.perSegment} (${smsStats.encoding})`
+                      : `${smsStats.length} chars • ${smsStats.segments} segments @ ${smsStats.perSegment} each (${smsStats.encoding})`}
+                  </div>
+                )}
+              </label>
+
+              <div className="text-[11px] text-white/60">
+                Tips: use tokens like <code className="font-mono">{'{contact.firstName}'}</code>, <code className="font-mono">{'{appointment.date}'}</code>, <code className="font-mono">{'{user.name}'}</code>.
               </div>
             </div>
           )}
         </div>
 
-        <div className="text-xs text-white/60">
-          Tokens fill at send time (e.g. <code className="font-mono">{"{contact.firstName}"}</code>, <code className="font-mono">{"{appointment.date}"}</code>, <code className="font-mono">{"{user.name}"}</code>).
+        {/* Sticky action bar — always visible */}
+        <div className="sticky bottom-0 p-2 border-t border-white/10 bg-neutral-950/95 backdrop-blur flex items-center justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="text-xs px-2 py-1 border border-white/15 bg-white/5 hover:bg-white/10 rounded-none"
+          >
+            Back to list
+          </button>
+
+          {!editing ? (
+            <>
+              <button
+                onClick={() => setEditing(true)}
+                className="text-xs px-2 py-1 border border-white/15 bg-white/5 hover:bg-white/10 rounded-none"
+              >
+                Edit
+              </button>
+              <button
+                onClick={onOpenTest}
+                className="text-xs px-2 py-1 border border-white/15 bg-white/10 hover:bg-white/20 rounded-none inline-flex items-center gap-1"
+                title="Test / simulate"
+              >
+                <Send size={12} /> Test
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                onClick={() => setEditing(false)}
+                className="text-xs px-2 py-1 border border-white/15 bg-white/5 hover:bg-white/10 rounded-none"
+                disabled={busy}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={save}
+                className="text-xs px-2 py-1 border border-white/15 bg-white/10 hover:bg-white/20 rounded-none"
+                disabled={busy}
+              >
+                {busy ? 'Saving…' : 'Save'}
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>

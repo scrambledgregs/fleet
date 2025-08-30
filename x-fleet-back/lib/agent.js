@@ -325,9 +325,10 @@ async function createAppointment({
 }
 
 // ---------- Main entry ----------
-export async function handleInbound({ from, to, text, send }) {
+export async function handleInbound({ from, to, text, send, context }) {
     pushTurn(from, "user", text);
   const s = getSession(from);
+    const inJobThread = !!(context && context.job && context.job.appointmentId);
 
   // defaults
   s.clientId     ||= 'default';

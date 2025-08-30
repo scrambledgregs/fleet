@@ -24,6 +24,13 @@ type VoiceRecordingEvent = {
   at?: string;
 };
 
+
+
+type VoiceMediaEvent =
+  | { type: 'start'; streamSid?: string | null; callSid?: string | null; at?: string }
+  | { type: 'stop'; at?: string }
+  | { type: 'ws_closed'; at?: string };
+
 type HistoryItem = { status: string; at: string };
 
 export type CallRow = {
@@ -39,7 +46,8 @@ export type CallRow = {
 
 type StatusEvent = { type: 'status'; at?: string; data: VoiceStatusEvent };
 type RecordingEvent = { type: 'recording'; at?: string; data: VoiceRecordingEvent };
-type AnyEvent = StatusEvent | RecordingEvent;
+type MediaEvent = { type: 'media'; at?: string; data: VoiceMediaEvent };
+type AnyEvent = StatusEvent | RecordingEvent | MediaEvent;
 
 const sockets = new Map<string, Socket>();
 
@@ -76,78 +84,88 @@ export function useVoiceStream(initialTenant?: string) {
     return arr;
   }, [events, version]);
 
-  useEffect(() => {
-    const socket = getSocketForTenant(tenantId);
+useEffect(() => {
+  const socket = getSocketForTenant(tenantId);
 
-    const onStatus = (ev: VoiceStatusEvent) => {
-      if (!ev || !ev.sid) return;
+  const onStatus = (ev: VoiceStatusEvent) => {
+    if (!ev || !ev.sid) return;
 
-      const prevRow: CallRow =
-        callsRef.current.get(ev.sid) || ({
-          sid: ev.sid,
-          from: ev.from ?? null,
-          to: ev.to ?? null,
-          status: 'unknown',
-          lastUpdate: new Date().toISOString(),
-          history: [] as HistoryItem[],
-        } as CallRow);
+    const prevRow: CallRow =
+      callsRef.current.get(ev.sid) || ({
+        sid: ev.sid,
+        from: ev.from ?? null,
+        to: ev.to ?? null,
+        status: 'unknown',
+        lastUpdate: new Date().toISOString(),
+        history: [] as HistoryItem[],
+      } as CallRow);
 
-      const at = ev.at || new Date().toISOString();
+    const at = ev.at || new Date().toISOString();
 
-      const next: CallRow = {
-        ...prevRow,
-        from: ev.from ?? prevRow.from,
-        to: ev.to ?? prevRow.to,
-        status: ev.status || prevRow.status,
-        lastUpdate: at,
-        history: [...prevRow.history, { status: ev.status || 'unknown', at }].slice(-20),
-      };
-
-      callsRef.current.set(ev.sid, next);
-
-      setEvents((prev): AnyEvent[] => [{ type: 'status' as const, at, data: ev }, ...prev].slice(0, 200));
+    const next: CallRow = {
+      ...prevRow,
+      from: ev.from ?? prevRow.from,
+      to: ev.to ?? prevRow.to,
+      status: ev.status || prevRow.status,
+      lastUpdate: at,
+      history: [...prevRow.history, { status: ev.status || 'unknown', at }].slice(-20),
     };
 
-    const onRecording = (ev: VoiceRecordingEvent) => {
-      if (!ev || !ev.callSid) return;
+    callsRef.current.set(ev.sid, next);
 
-      const prevRow: CallRow =
-        callsRef.current.get(ev.callSid) || ({
-          sid: ev.callSid,
-          from: ev.from ?? null,
-          to: ev.to ?? null,
-          status: ev.callStatus || 'completed',
-          lastUpdate: new Date().toISOString(),
-          history: [] as HistoryItem[],
-        } as CallRow);
+    setEvents((prev): AnyEvent[] => [{ type: 'status' as const, at, data: ev }, ...prev].slice(0, 200));
+  };
 
-      const at = ev.at || new Date().toISOString();
+  const onRecording = (ev: VoiceRecordingEvent) => {
+    if (!ev || !ev.callSid) return;
 
-      const next: CallRow = {
-        ...prevRow,
-        status: ev.callStatus || prevRow.status || 'completed',
-        lastUpdate: at,
-        recordingUrl: ev.url ?? prevRow.recordingUrl,
-        recordingDuration:
-          typeof ev.durationSec === 'number' ? ev.durationSec : prevRow.recordingDuration ?? null,
-        history: [...prevRow.history, { status: ev.callStatus || 'completed', at }].slice(-20),
-      };
+    const prevRow: CallRow =
+      callsRef.current.get(ev.callSid) || ({
+        sid: ev.callSid,
+        from: ev.from ?? null,
+        to: ev.to ?? null,
+        status: ev.callStatus || 'completed',
+        lastUpdate: new Date().toISOString(),
+        history: [] as HistoryItem[],
+      } as CallRow);
 
-      callsRef.current.set(ev.callSid, next);
+    const at = ev.at || new Date().toISOString();
 
-      setEvents((prev): AnyEvent[] =>
-        [{ type: 'recording' as const, at, data: ev }, ...prev].slice(0, 200)
-      );
+    const next: CallRow = {
+      ...prevRow,
+      status: ev.callStatus || prevRow.status || 'completed',
+      lastUpdate: at,
+      recordingUrl: ev.url ?? prevRow.recordingUrl,
+      recordingDuration:
+        typeof ev.durationSec === 'number' ? ev.durationSec : prevRow.recordingDuration ?? null,
+      history: [...prevRow.history, { status: ev.callStatus || 'completed', at }].slice(-20),
     };
 
-    socket.on('voice:status', onStatus);
-    socket.on('voice:recording', onRecording);
+    callsRef.current.set(ev.callSid, next);
 
-    return () => {
-      socket.off('voice:status', onStatus);
-      socket.off('voice:recording', onRecording);
-    };
-  }, [tenantId]);
+    setEvents((prev): AnyEvent[] =>
+      [{ type: 'recording' as const, at, data: ev }, ...prev].slice(0, 200)
+    );
+  };
+
+  // 👇 NEW: media handler at top level (not nested)
+  const onMedia = (ev: VoiceMediaEvent) => {
+    const at = (ev as any).at || new Date().toISOString();
+    setEvents((prev): AnyEvent[] =>
+      [{ type: 'media' as const, at, data: ev }, ...prev].slice(0, 200)
+    );
+  };
+
+  socket.on('voice:status', onStatus);
+  socket.on('voice:recording', onRecording);
+  socket.on('voice:media', onMedia); // 👈 register
+
+  return () => {
+    socket.off('voice:status', onStatus);
+    socket.off('voice:recording', onRecording);
+    socket.off('voice:media', onMedia); // 👈 cleanup
+  };
+}, [tenantId]);
 
   const placeCall = useCallback(
     async (to: string, opts: Record<string, unknown> = {}) => {

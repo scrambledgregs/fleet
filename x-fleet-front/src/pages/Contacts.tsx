@@ -1,23 +1,28 @@
-import { useEffect, useRef, useState } from 'react'
+// x-fleet-front/src/pages/Contacts.tsx
+import React, { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import ContactsPanel from '../components/ContactsPanel'
 import { Plus } from 'lucide-react'
 
+type Segment = 'all' | 'customers' | 'leads'
+type SortBy = 'recent' | 'name'
+type Counts = { all: number; customers: number; leads: number }
+
 export default function ContactsPage() {
   const navigate = useNavigate()
 
-  // page-level filters/controls
-  const [segment, setSegment] = useState('all') // 'all' | 'customers' | 'leads'
-  const [query, setQuery] = useState('')
-  const [sortBy] = useState('recent') // default behavior; no UI control
-  const [counts, setCounts] = useState({ all: 0, customers: 0, leads: 0 })
+  // page-level filters/controls (typed)
+  const [segment, setSegment] = useState<Segment>('all')
+  const [query, setQuery] = useState<string>('')
+  const [sortBy] = useState<SortBy>('recent') // default behavior; no UI control
+  const [counts, setCounts] = useState<Counts>({ all: 0, customers: 0, leads: 0 })
 
-  const topSearchRef = useRef(null)
-  const fileRef = useRef(null)
+  const topSearchRef = useRef<HTMLInputElement | null>(null)
+  const fileRef = useRef<HTMLInputElement | null>(null)
 
   // Keyboard: '/', 'c', 'i', 'Esc'
   useEffect(() => {
-    function onKey(e) {
+    const onKey = (e: KeyboardEvent) => {
       const tag = (document.activeElement?.tagName || '').toLowerCase()
       const isTyping = tag === 'input' || tag === 'textarea'
 
@@ -38,9 +43,12 @@ export default function ContactsPage() {
       }
       if (e.key === 'Escape') {
         setQuery('')
-        try { topSearchRef.current?.blur() } catch {}
+        try {
+          topSearchRef.current?.blur()
+        } catch {}
       }
     }
+
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [])
@@ -49,7 +57,7 @@ export default function ContactsPage() {
     navigate('/contacts/new')
   }
 
-  async function importCsv(file) {
+  async function importCsv(file: File | null) {
     if (!file) return
     // TODO: wire up your real importer endpoint
     console.log('Import CSV selected:', file.name)
@@ -63,7 +71,7 @@ export default function ContactsPage() {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <div className="text-xs text-white/60">
-              Manage your people & companies. Press{' '}
+              Manage your people &amp; companies. Press{' '}
               <kbd className="px-1 py-0.5 bg-white/10 rounded">/</kbd> to search,{' '}
               <kbd className="px-1 py-0.5 bg-white/10 rounded">c</kbd> to create,{' '}
               <kbd className="px-1 py-0.5 bg-white/10 rounded">i</kbd> to import.
@@ -79,7 +87,9 @@ export default function ContactsPage() {
                 placeholder="Search contacts…"
                 className="w-[min(44ch,60vw)] bg-black/30 border border-white/10 rounded-none px-2 py-2 text-sm outline-none focus:border-white/30"
               />
-              <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-xs text-white/40">/</span>
+              <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-xs text-white/40">
+                /
+              </span>
             </div>
 
             {/* Make Import subtle so New Contact is the hero */}
@@ -95,7 +105,7 @@ export default function ContactsPage() {
               type="file"
               accept=".csv"
               className="hidden"
-              onChange={(e) => importCsv(e.target.files?.[0] || null)}
+              onChange={(e) => importCsv(e.target.files?.[0] ?? null)}
             />
 
             <button
@@ -141,7 +151,6 @@ export default function ContactsPage() {
           sortBy={sortBy}
           segment={segment}
           onCreateContact={openNewContact}
-          // 👇 receive counts from the panel so tabs can show them
           onCounts={(c) => setCounts(c)}
         />
       </div>
