@@ -1,5 +1,5 @@
 // src/lib/salesApi.ts
-import { api } from "./api";
+import api, { resolveTenantId } from "./http";
 import type {
   Rep,
   Payment,
@@ -8,42 +8,91 @@ import type {
   CustomerSummary,
 } from "../types/sales";
 
+/** Build consistent tenant headers/params for every call */
+function tcfg() {
+  const tenant = resolveTenantId();
+  return {
+    tenant,
+    headers: { "X-Tenant-Id": tenant },
+    params: { clientId: tenant },
+  } as const;
+}
+
+// -----------------------------
 // Reps
-export const getReps = (): Promise<Rep[]> => api(`/api/reps`);
+// -----------------------------
+export const getReps = async (): Promise<Rep[]> => {
+  const { headers, params } = tcfg();
+  const { data } = await api.get<Rep[]>("/api/reps", { headers, params });
+  return Array.isArray(data) ? data : [];
+};
 
-// Payments (unassigned only)
-export const getUnassignedPayments = (): Promise<Payment[]> =>
-  api(`/api/payments?unassigned=1`);
+// -----------------------------
+// Payments (unassigned + commissionable)
+// -----------------------------
+export const getUnassignedPayments = async (): Promise<Payment[]> => {
+  const { headers, params } = tcfg();
+  const { data } = await api.get("/api/payments", {
+    headers,
+    params: { ...params, unassigned: 1, commissionable: 1 },
+  });
+  // Support both shapes from the backend
+  return Array.isArray(data) ? (data as Payment[]) : (data?.items ?? []);
+};
 
+// -----------------------------
 // Assign a payment to a rep
-export const assignPaymentRep = (
+// -----------------------------
+export const assignPaymentRep = async (
   chargeId: string,
   repId: string,
   commissionPct?: number
-): Promise<{ ok: true }> =>
-  api(`/api/payments`, {
-    method: "POST",
-    body: JSON.stringify({
+): Promise<{ ok: true }> => {
+  const { tenant, headers } = tcfg();
+  const { data } = await api.post(
+    "/api/payments",
+    {
       action: "assign",
       chargeId,
       repId,
       commissionPct,
-    }),
-  });
+      clientId: tenant, // keep body + header in sync
+    },
+    { headers }
+  );
+  return data;
+};
 
+// -----------------------------
 // Analytics
+// -----------------------------
 export type Range = "this-month" | "last-30";
 
-export const getCommissionByRep = (
+export const getCommissionByRep = async (
   range: Range = "this-month"
-): Promise<CommissionRow[]> =>
-  api(`/api/analytics/commission-by-rep?range=${encodeURIComponent(range)}`);
+): Promise<CommissionRow[]> => {
+  const { headers, params } = tcfg();
+  const { data } = await api.get("/api/analytics/commission-by-rep", {
+    headers,
+    params: { ...params, range },
+  });
+  return Array.isArray(data) ? (data as CommissionRow[]) : [];
+};
 
-export const getOutstandingByCustomer = (): Promise<OutstandingRow[]> =>
-  api(`/api/analytics/outstanding-by-customer`);
+export const getOutstandingByCustomer = async (): Promise<OutstandingRow[]> => {
+  const { headers, params } = tcfg();
+  const { data } = await api.get("/api/analytics/outstanding-by-customer", {
+    headers,
+    params,
+  });
+  return Array.isArray(data) ? (data as OutstandingRow[]) : [];
+};
 
-export const getCustomersBreakdown = (): Promise<CustomerSummary[]> =>
-  api(`/api/analytics/customers`);
+export const getCustomersBreakdown = async (): Promise<CustomerSummary[]> => {
+  const { headers, params } = tcfg();
+  const { data } = await api.get("/api/analytics/customers", { headers, params });
+  return Array.isArray(data) ? (data as CustomerSummary[]) : [];
+};
 
 // -----------------------------
 // Customer ↔ Rep assignments
@@ -54,35 +103,42 @@ export type CustomerRepRow = {
   repName?: string | null;
 };
 
-// List all current assignments for the tenant
 export const listCustomerReps = async (): Promise<CustomerRepRow[]> => {
-  const r = await api(`/api/customer-reps`);
-  if (Array.isArray(r)) return r;
-  if (r && Array.isArray(r.items)) return r.items;
+  const { headers, params } = tcfg();
+  const { data } = await api.get("/api/customer-reps", { headers, params });
+  if (Array.isArray(data)) return data as CustomerRepRow[];
+  if (data && Array.isArray(data.items)) return data.items as CustomerRepRow[];
   return [];
 };
 
-// Set or unset an assignment (pass null to unassign)
-export const assignCustomerRep = (
+export const assignCustomerRep = async (
   customerId: string,
   repId: string | null
-): Promise<{ ok: true; saved?: { customerId: string; repId: string }; removed?: string }> =>
-  api(`/api/customer-reps`, {
-    method: "POST",
-    body: JSON.stringify({ customerId, repId }),
-  });
+): Promise<{ ok: true; saved?: { customerId: string; repId: string }; removed?: string }> => {
+  const { tenant, headers } = tcfg();
+  const { data } = await api.post(
+    "/api/customer-reps",
+    { customerId, repId, tenantId: tenant, clientId: tenant },
+    { headers }
+  );
+  return data;
+};
 
-// Convenience: unassign wrapper
-export const unassignCustomerRep = (customerId: string) =>
-  assignCustomerRep(customerId, null);
+export const unassignCustomerRep = (customerId: string) => assignCustomerRep(customerId, null);
 
-// Trigger a commission payout for a rep (server will record/send actual payment)
-export const createCommissionPayout = (
+// -----------------------------
+// Commission payouts
+// -----------------------------
+export const createCommissionPayout = async (
   repId: string,
   amountUsd: number,
   note?: string
-): Promise<{ ok: true }> =>
-  api(`/api/commissions/payout`, {
-    method: "POST",
-    body: JSON.stringify({ repId, amountUsd, note }),
-  });
+): Promise<{ ok: true }> => {
+  const { tenant, headers } = tcfg();
+  const { data } = await api.post(
+    "/api/commissions/payout",
+    { repId, amountUsd, note, tenantId: tenant, clientId: tenant },
+    { headers }
+  );
+  return data;
+};

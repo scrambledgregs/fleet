@@ -416,32 +416,43 @@ app.get('/api/reps', (req, res) => {
 });
 
 // GET /api/payments
-// - ?unassigned=1        → only items with no sales_rep_id
-// - ?commissionable=1    → only items that pass isCommissionable()
-// - ?paged=1&page=1&pageSize=50 → paged response (keeps old array shape if paged!=1)
+// - ?unassigned=1
+// - ?commissionable=1
+// - ?minUsd=NUMBER (defaults to COMMISSIONABLE_MIN_USD, default 500)
+// - ?paged=1&page=1&pageSize=50
 app.get('/api/payments', (req, res) => {
   const bag = paymentsBag(req.tenantId);
 
-  const paged = req.query.paged === '1';
-  const unassigned = req.query.unassigned === '1';
-  // By default, the "unassigned" view should only show items worth assigning (> $500)
-  const filterCommissionable = req.query.commissionable === '1' || unassigned;
+  const paged = String(req.query.paged || '') === '1';
+  const unassigned = String(req.query.unassigned || '') === '1';
+
+  const enforceMinOnUnassigned =
+    String(process.env.ENFORCE_MIN_ON_UNASSIGNED || '').toLowerCase() === 'true';
+
+  const filterCommissionable =
+    String(req.query.commissionable || '') === '1' ||
+    (enforceMinOnUnassigned && unassigned);
+
+  const minUsdParam = Number(req.query.minUsd);
+  const effectiveMinUsd = Number.isFinite(minUsdParam)
+    ? minUsdParam
+    : Number(process.env.COMMISSIONABLE_MIN_USD || 500);
 
   let list = Array.from(bag.values());
 
   if (unassigned) list = list.filter((p) => !p.sales_rep_id);
-  if (filterCommissionable) list = list.filter((p) => isCommissionable(p));
+  if (filterCommissionable) {
+    list = list.filter((p) => {
+      const dollars = Number((p?.net ?? p?.amount) || 0) / 100;
+      return Number.isFinite(dollars) && dollars >= effectiveMinUsd; // inclusive ≥
+    });
+  }
 
-  // newest first helps you see recent money without scrolling forever
+  // Always sort + respond from here (outside the if)
   list.sort((a, b) => new Date(b.paid_at) - new Date(a.paid_at));
-
-  // Hide internal field for UI
   const rows = list.map(({ sales_rep_id, ...p }) => p);
 
-  if (!paged) {
-    // Backward-compatible: return plain array unless you ask for pagination
-    return res.json(rows);
-  }
+  if (!paged) return res.json(rows);
 
   const page = Math.max(1, Number(req.query.page) || 1);
   const pageSize = Math.max(1, Math.min(200, Number(req.query.pageSize) || 50));

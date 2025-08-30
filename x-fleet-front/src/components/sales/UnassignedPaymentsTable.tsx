@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Rep, Payment } from "../../types/sales";
-import { getUnassignedPayments, getReps, assignPaymentRep } from "../../lib/salesApi";
+import { getReps, assignPaymentRep } from "../../lib/salesApi";
+import api, { resolveTenantId } from "../../lib/http";
 
 type Range = "this-month" | "last-30" | "all";
 
@@ -33,9 +34,19 @@ export default function UnassignedPaymentsTable({ range = "this-month" }: { rang
     setLoading(true);
     setError(null);
     try {
-      const [p, r] = await Promise.all([getUnassignedPayments(), getReps()]);
-      setRows(p);
-      setReps(r);
+      // ✅ Back to the exact endpoint/shape that was known-good
+      const tenant = resolveTenantId();
+      const { data } = await api.get("/api/payments", {
+        headers: { "X-Tenant-Id": tenant },
+        params: { clientId: tenant, paged: 1, page: 1, pageSize: 100 },
+      });
+
+      // Server returns { ok, page, pageSize, total, items } when paged=1
+      const items: Payment[] = Array.isArray(data) ? data : (data?.items ?? []);
+      setRows(items);
+
+      const repsResp = await getReps();
+      setReps(Array.isArray(repsResp) ? repsResp : []);
     } catch (e: any) {
       setError(e?.message || "Failed to load");
     } finally {
@@ -75,8 +86,7 @@ export default function UnassignedPaymentsTable({ range = "this-month" }: { rang
 
   if (loading) return <div className="text-sm text-muted-foreground">Loading…</div>;
   if (error) return <div className="text-sm text-red-600">{error}</div>;
-  if (!filtered.length)
-    return <div className="text-sm">No unassigned payments 🎉</div>;
+  if (!filtered.length) return <div className="text-sm">No payments found.</div>;
 
   return (
     <div className="rounded-2xl border">

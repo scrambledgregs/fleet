@@ -21,18 +21,26 @@ export const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE || "", // relative -> same origin unless env provided
 });
 
-// Decide tenant per request: query -> localStorage -> subdomain -> default
+// Decide tenant per request
 export function resolveTenantId(): string {
   if (!isBrowser) return "default";
+
   const qs = new URLSearchParams(window.location.search);
   const fromQS = qs.get("tenantId") || qs.get("clientId");
-  const stored = localStorage.getItem("tenantId") || "";
+
   const host = window.location.hostname;
-  const sub = host.split(".")[0];
   const isLocal = host === "localhost" || host === "127.0.0.1";
-  const fromSub = !isLocal && sub && sub !== "www" ? sub : "";
-  // Force the "localhost" tenant when developing locally (matches your curl)
-  return (fromQS || stored || fromSub || (isLocal ? "localhost" : "default")).toLowerCase();
+
+  // ✅ On localhost, ALWAYS use "localhost" unless explicitly overridden in the URL.
+  if (isLocal) {
+    return (fromQS || "localhost").toLowerCase();
+  }
+
+  // In non-local envs: query -> localStorage -> subdomain -> default
+  const stored = localStorage.getItem("tenantId") || "";
+  const sub = host.split(".")[0];
+  const fromSub = sub && sub !== "www" ? sub : "";
+  return (fromQS || stored || fromSub || "default").toLowerCase();
 }
 
 function touchesFleetApi(cfg: InternalAxiosRequestConfig): boolean {
@@ -112,9 +120,7 @@ if (isBrowser && !window.__TENANT_FETCH_PATCHED__) {
       const tenant = resolveTenantId();
 
       // Build a URL to modify query params
-      const u = isRelativeApi
-        ? new URL(urlStr, window.location.origin)
-        : new URL(urlStr);
+      const u = isRelativeApi ? new URL(urlStr, window.location.origin) : new URL(urlStr);
 
       // Ensure clientId=tenant is present (unless already set)
       if (!u.searchParams.has("clientId") && !u.searchParams.has("tenantId")) {
@@ -122,19 +128,18 @@ if (isBrowser && !window.__TENANT_FETCH_PATCHED__) {
       }
 
       // Add/merge headers with X-Tenant-Id
-      const headers = new Headers(init?.headers || (typeof input !== "string" ? (input as Request).headers : undefined));
+      const headers = new Headers(
+        init?.headers || (typeof input !== "string" ? (input as Request).headers : undefined)
+      );
       if (!headers.has("X-Tenant-Id")) {
         headers.set("X-Tenant-Id", tenant);
       }
 
       // Route relative /api/... to API_BASE if provided
       const finalUrl =
-        isRelativeApi && API_BASE
-          ? `${API_BASE}${u.pathname}${u.search}`
-          : u.toString();
+        isRelativeApi && API_BASE ? `${API_BASE}${u.pathname}${u.search}` : u.toString();
 
       if (import.meta.env.DEV) {
-        // lightweight debug to verify what the page actually calls
         // eslint-disable-next-line no-console
         console.debug("[tenant fetch]", { finalUrl, tenant });
       }
