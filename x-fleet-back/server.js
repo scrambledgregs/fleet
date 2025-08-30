@@ -416,40 +416,48 @@ app.get('/api/reps', (req, res) => {
 });
 
 // GET /api/payments
-// - ?unassigned=1
-// - ?commissionable=1
-// - ?minUsd=NUMBER (defaults to COMMISSIONABLE_MIN_USD, default 500)
-// - ?paged=1&page=1&pageSize=50
+// - ?unassigned=1        → only items with no sales_rep_id
+// - ?commissionable=1    → only items >= minUsd (defaults to COMMISSIONABLE_MIN_USD)
+// - ?minUsd=500          → override threshold (dollars)
+// - ?paged=1&page=1&pageSize=50 → paged response; otherwise returns a plain array
 app.get('/api/payments', (req, res) => {
   const bag = paymentsBag(req.tenantId);
 
-  const paged = String(req.query.paged || '') === '1';
-  const unassigned = String(req.query.unassigned || '') === '1';
+  const flag = (v) => String(v || '') === '1';
+  const paged = flag(req.query.paged);
+  const unassigned = flag(req.query.unassigned);
 
   const enforceMinOnUnassigned =
     String(process.env.ENFORCE_MIN_ON_UNASSIGNED || '').toLowerCase() === 'true';
 
-  const filterCommissionable =
-    String(req.query.commissionable || '') === '1' ||
-    (enforceMinOnUnassigned && unassigned);
+  const wantCommissionable =
+    flag(req.query.commissionable) || (enforceMinOnUnassigned && unassigned);
 
   const minUsdParam = Number(req.query.minUsd);
   const effectiveMinUsd = Number.isFinite(minUsdParam)
     ? minUsdParam
-    : Number(process.env.COMMISSIONABLE_MIN_USD || 500);
+    : COMMISSIONABLE_MIN_USD;
 
   let list = Array.from(bag.values());
 
-  if (unassigned) list = list.filter((p) => !p.sales_rep_id);
-  if (filterCommissionable) {
+  // 1) Unassigned filter
+  if (unassigned) {
+    list = list.filter((p) => p.sales_rep_id == null || String(p.sales_rep_id).trim() === '');
+  }
+
+  // 2) Commissionable filter (>= dollars)
+  if (wantCommissionable) {
     list = list.filter((p) => {
-      const dollars = Number((p?.net ?? p?.amount) || 0) / 100;
-      return Number.isFinite(dollars) && dollars >= effectiveMinUsd; // inclusive ≥
+      const cents = Number(p?.net ?? p?.amount ?? 0);
+      const dollars = cents / 100;
+      return Number.isFinite(dollars) && dollars >= effectiveMinUsd;
     });
   }
 
-  // Always sort + respond from here (outside the if)
+  // 3) Sort newest first
   list.sort((a, b) => new Date(b.paid_at) - new Date(a.paid_at));
+
+  // 4) Hide internal field in response
   const rows = list.map(({ sales_rep_id, ...p }) => p);
 
   if (!paged) return res.json(rows);
