@@ -80,6 +80,7 @@ const SECTIONS = [
     links: [
       { to: '/estimator', label: 'Estimates', icon: FileText },
       { to: '/invoices',  label: 'Invoices',  icon: BadgeDollarSign },
+      { to: '/sales',  label: 'SalesTracker',  icon: BadgeDollarSign },
     ],
   },
   {

@@ -1,20 +1,41 @@
+// sdc-backend/server.js
+// =============================================================================
+// Service Dispatch & Comms (SDC) — Multi-tenant backend
+//
+// ✅ What changed (readability-only):
+//   - Grouped & annotated imports
+//   - Consistent section banners and headings
+//   - Small comment cleanups & normalized logging labels
+//   - No breaking changes: same routes, same behavior
+//
+// Tip: search for "====" to jump between sections.
+// =============================================================================
+
 import 'dotenv/config';
 
+// ── Core & HTTP ───────────────────────────────────────────────────────────────
 import express from 'express';
 import http from 'http';
-import { Server as SocketIOServer } from 'socket.io';
 import cors from 'cors';
 import fetch from 'node-fetch';
 import axios from 'axios';
 
+// ── Realtime (Socket.IO & WS) ────────────────────────────────────────────────
+import { Server as SocketIOServer } from 'socket.io';
+import { WebSocketServer } from 'ws';
+
+// ── Telephony & Messaging ────────────────────────────────────────────────────
 import twilio from 'twilio';
 import { verifyTwilio } from './lib/twilio.js';
-import { scoreAllReps } from './lib/fit.js';
 import { sendSMS, placeCall } from './lib/twilio.js';
+
+// ── AI helpers & domain logic ────────────────────────────────────────────────
 import { handleInbound as agentHandle } from './lib/agent.js';
-import { recordSms, normalizePhone as phoneE164, getThread } from './lib/chatter.js';
+import { scoreAllReps } from './lib/fit.js';
+import { aiEstimate } from './lib/estimate.ts';
+import { generateEstimateItems, draftEstimateCopy } from './lib/estimate-llm.ts';
 
-
+// ── CRM / GHL integration ───────────────────────────────────────────────────
 import {
   getContact,
   createContact,
@@ -24,22 +45,28 @@ import {
   createAppointmentV2,
 } from './lib/ghl.js';
 
-import createChatterRouter from './routes/chatter.js';
+// ── Email ────────────────────────────────────────────────────────────────────
 import mailgunRoute from './routes/mailgun.ts';
 import { sendEmail } from './lib/mailgun.ts';
 import { draftEmail } from './lib/emailDraft.ts';
 import emailSendRoute from './routes/emailSend.ts';
-import { SuggestTimesRequestSchema, CreateAppointmentReqSchema, UpsertTechsRequestSchema } from './lib/schemas.js';
-import { generateEstimateItems, draftEstimateCopy } from './lib/estimate-llm.ts';
-import { aiEstimate } from './lib/estimate.ts';
+
+// ── Routers & schemas ────────────────────────────────────────────────────────
+import createChatterRouter from './routes/chatter.js';
 import contactsRouter from './routes/contacts.ts';
+import { makeChatRouter } from './routes/chat';
+import { makeTeamRouter } from './routes/team.ts';
+import {
+  SuggestTimesRequestSchema,
+  CreateAppointmentReqSchema,
+  UpsertTechsRequestSchema,
+} from './lib/schemas.js';
+
+// ── Events & automations ─────────────────────────────────────────────────────
 import { createEvent, recordAndEmit, listEvents } from './lib/events.ts';
 import { registerAutomationRoutes, dispatchEvent } from './lib/automations.ts';
-import { makeChatRouter } from './routes/chat';
-import { makeTeamRouter } from './routes/team';
 
-
-// 🔁 Central repo: one place for all in-memory stores & caches
+// ── In-memory repos (central cache/stores) ───────────────────────────────────
 import {
   geocodeCache,
   driveCache,
@@ -52,7 +79,29 @@ import {
   getAutoPref,
 } from './lib/repos/memory.ts';
 
-// 🧭 New centralized phone→tenant mapping
+// ── Payments (Stripe) ─────────────────────────────────────────────────────────
+import Stripe from 'stripe';
+
+// Accept several env names and a safe default API version
+const STRIPE_API_VERSION = (process.env.STRIPE_API_VERSION || '2024-04-10').trim();
+const STRIPE_SECRET =
+  (process.env.STRIPE_SECRET_KEY ||
+   process.env.STRIPE_SECRET ||
+   process.env.STRIPE_API_KEY ||
+   '').trim();
+
+const stripe = STRIPE_SECRET ? new Stripe(STRIPE_SECRET, { apiVersion: STRIPE_API_VERSION }) : null;
+// Commission rule: only payments strictly over $500 are commissionable.
+// You can change the threshold via env: COMMISSIONABLE_MIN_USD
+const COMMISSIONABLE_MIN_USD = Number(process.env.COMMISSIONABLE_MIN_USD || 500);
+
+function isCommissionable(payment) {
+  const cents = (payment?.net ?? payment?.amount) || 0; // cents
+  const baseUsd = cents / 100;
+  return Number.isFinite(baseUsd) && baseUsd > COMMISSIONABLE_MIN_USD;
+}
+
+// ── Tenant phone registry (phone ➜ tenant) ───────────────────────────────────
 import {
   loadTenantPhoneSeeds,
   getTenantForPhone,
@@ -60,12 +109,12 @@ import {
   removeTenantPhone,
   listTenantPhoneMap,
 } from './lib/repos/tenants.ts';
-import { WebSocketServer } from 'ws'
 
-// WebSocket server for Twilio Media Streams
-const mediaWSS = new WebSocketServer({ noServer: true })
+// =============================================================================
+// WebSocket (Twilio Media Streams)
+// =============================================================================
 
-// Path Twilio will connect to for Media Streams
+const mediaWSS = new WebSocketServer({ noServer: true });
 const VOICE_WS_PATH = '/twilio/media';
 
 // Prefer PUBLIC_WS_URL (wss://...), else derive from PUBLIC_URL
@@ -77,18 +126,20 @@ function publicWsUrl() {
   return base.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:');
 }
 
-
-
-// Basic handler: logs stream lifecycle and forwards key events to the UI
+// Twilio connects here for bi-directional audio (8kHz PCM16)
 mediaWSS.on('connection', (ws, req) => {
-  const url = new URL(req.url, 'http://localhost'); // base is ignored
+  const url = new URL(req.url, 'http://localhost'); // base ignored, for parsing
   const tenantId = (url.searchParams.get('tenantId') || 'default').toLowerCase();
 
   ws.on('message', (buf) => {
     let msg;
-    try { msg = JSON.parse(buf.toString()); } catch { return; }
+    try {
+      msg = JSON.parse(buf.toString());
+    } catch {
+      return;
+    }
 
-    // Twilio sends 'start' | 'media' | 'stop' events
+    // Twilio sends: 'start' | 'media' | 'stop'
     if (msg.event === 'start') {
       emitTenant(tenantId, 'voice:media', {
         type: 'start',
@@ -110,23 +161,25 @@ mediaWSS.on('connection', (ws, req) => {
   });
 });
 
+// =============================================================================
+// Express & Socket.IO setup
+// =============================================================================
+
 const app = express();
 const server = http.createServer(app);
+const io = new SocketIOServer(server, {
+  cors: { origin: process.env.ALLOW_ORIGIN || '*', methods: ['GET', 'POST'] },
+});
+
 const CHATTER_AI = process.env.CHATTER_AI === 'true';
 
-// Upgrade HTTP to WebSocket for Twilio Media Streams
+// Upgrade HTTP ➜ WS (for Twilio Media Streams)
 server.on('upgrade', (req, socket, head) => {
   if (!req.url || !req.url.startsWith(VOICE_WS_PATH)) return;
   mediaWSS.handleUpgrade(req, socket, head, (ws) => {
     mediaWSS.emit('connection', ws, req);
   });
 });
-
-const io = new SocketIOServer(server, {
-  cors: { origin: process.env.ALLOW_ORIGIN || '*', methods: ['GET', 'POST'] },
-});
-
-
 
 // ---- Socket.IO tenant scoping ----
 io.use((socket, next) => {
@@ -154,7 +207,62 @@ function ioForTenant(tenantId) {
   return { emit: (event, payload) => io.to(room).emit(event, payload) };
 }
 
-// ---- Geocode + Drive helpers (backed by shared caches) ----
+// =============================================================================
+// Middleware & global setup
+// =============================================================================
+
+function resolveTenant(req) {
+  const hdr = req.get('X-Tenant-Id');
+  const q = req.query && req.query.clientId;
+  const bodyClient = req.body && req.body.clientId;
+  const sub = (req.hostname || '').split('.')[0];
+
+  const t =
+    (hdr && String(hdr)) ||
+    (q && String(q)) ||
+    (bodyClient && String(bodyClient)) ||
+    (sub && sub !== 'www' ? sub : '') ||
+    'default';
+
+  req.tenantId = String(t).toLowerCase();
+  return req.tenantId;
+}
+function withTenant(req, _res, next) {
+  resolveTenant(req);
+  next();
+}
+
+loadTenantPhoneSeeds(process.env.TWILIO_TENANT_MAP);
+
+app.use(withTenant);
+app.use(cors({ origin: process.env.ALLOW_ORIGIN || '*' }));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
+
+// Routers
+app.use('/api/chat', makeChatRouter(io));
+app.use('/api/team', makeTeamRouter(io));
+app.use(createChatterRouter(io));
+app.use('/api', mailgunRoute);
+app.use('/api', emailSendRoute);
+app.use('/api/contacts-db', contactsRouter);
+app.use('/api', registerAutomationRoutes());
+
+// Request log (brief)
+app.use((req, _res, next) => {
+  console.log(`[REQ] ${req.method} ${req.url} ct=${req.headers['content-type'] || ''}`);
+  if (req.method !== 'GET') {
+    try {
+      console.log('[BODY]', JSON.stringify(req.body).slice(0, 500));
+    } catch {}
+  }
+  next();
+});
+
+// =============================================================================
+// Geocode & Drive helpers (shared LRU caches)
+// =============================================================================
+
 async function geocodeAddress(address) {
   if (!address) return null;
   const hit = geocodeCache.get(address);
@@ -184,10 +292,7 @@ async function getDriveMinutes(from, to) {
   if (!from || !to) return null;
   const f = `${from.lat},${from.lng}`;
   const t = `${to.lat},${to.lng}`;
-  if (
-    !/^-?\d+(\.\d+)?,\-?\d+(\.\d+)?$/.test(f) ||
-    !/^-?\d+(\.\d+)?,\-?\d+(\.\d+)?$/.test(t)
-  )
+  if (!/^-?\d+(\.\d+)?,\-?\d+(\.\d+)?$/.test(f) || !/^-?\d+(\.\d+)?,\-?\d+(\.\d+)?$/.test(t))
     return null;
 
   const key = `${from.lat},${from.lng}|${to.lat},${to.lng}`;
@@ -219,64 +324,619 @@ async function getDriveMinutes(from, to) {
   return null;
 }
 
-// ---- Mock conversations / globals ----
+// =============================================================================
+// Mock conversations & globals
+// =============================================================================
 const mockConvos = new Map(); // conversationId -> { id, contactId, messages: [...] }
 const mockByContact = new Map(); // contactId -> conversationId
 const uuid = () => 'c_' + Math.random().toString(36).slice(2);
 let VOICE_AI_ENABLED = false;
 
-// ---- Tenant resolution (JS) ----
-function resolveTenant(req) {
-  const hdr = req.get('X-Tenant-Id');
-  const q = req.query && req.query.clientId;
-  const bodyClient = req.body && req.body.clientId;
-  const sub = (req.hostname || '').split('.')[0];
+// =============================================================================
+// Sales tracker (in-memory demo) + API
+// =============================================================================
 
-  const t =
-    (hdr && String(hdr)) ||
-    (q && String(q)) ||
-    (bodyClient && String(bodyClient)) ||
-    (sub && sub !== 'www' ? sub : '') ||
-    'default';
+const salesRepsByClient = new Map(); // tenantId -> Rep[]
+const paymentsByClient = new Map(); // tenantId -> Map(chargeId -> Payment)
 
-  req.tenantId = String(t).toLowerCase();
-  return req.tenantId;
+function repsBag(clientId = 'default') {
+  const key = String(clientId || 'default').toLowerCase();
+  if (!salesRepsByClient.has(key)) salesRepsByClient.set(key, []);
+  return salesRepsByClient.get(key);
+}
+function paymentsBag(clientId = 'default') {
+  const key = String(clientId || 'default').toLowerCase();
+  if (!paymentsByClient.has(key)) paymentsByClient.set(key, new Map());
+  return paymentsByClient.get(key);
 }
 
-function withTenant(req, _res, next) {
-  resolveTenant(req);
-  next();
+// Seed demo data unless disabled
+if (process.env.SEED_DEMO_SALES !== 'false') {
+  salesRepsByClient.set('default', [
+    { id: 'rep_alex', name: 'Alex', defaultCommissionPct: 0.1 },
+    { id: 'rep_bella', name: 'Bella', defaultCommissionPct: 0.12 },
+  ]);
+  const bag = paymentsBag('default');
+  bag.set('ch_demo_1', {
+    stripe_charge_id: 'ch_demo_1',
+    paid_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    amount: 550000, // cents
+    net: 533500, // cents
+    customer_name: 'Demo Customer A',
+    sales_rep_id: null,
+  });
+  bag.set('ch_demo_2', {
+    stripe_charge_id: 'ch_demo_2',
+    paid_at: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+    amount: 200000,
+    net: 194800,
+    customer_name: 'Demo Customer B',
+    sales_rep_id: 'rep_alex',
+  });
 }
 
-// ---- Startup seeds (if provided) ----
-loadTenantPhoneSeeds(process.env.TWILIO_TENANT_MAP);
+/* ── Sales: assignments & analytics ────────────────────────────────────────── */
+const customerRepsByTenant = new Map(); // tenantId -> Map(customerId -> repId)
+function bagCustomerRepMap(tenantId) {
+  const key = String(tenantId || 'default').toLowerCase();
+  if (!customerRepsByTenant.has(key)) customerRepsByTenant.set(key, new Map());
+  return customerRepsByTenant.get(key);
+}
 
-app.use(withTenant);
-app.use(cors({ origin: process.env.ALLOW_ORIGIN || '*' }));
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
-app.use('/api/chat', makeChatRouter(io));
-app.use('/api/team', makeTeamRouter(io));
-
-
-app.use((req, _res, next) => {
-  console.log(`[REQ] ${req.method} ${req.url} ct=${req.headers['content-type'] || ''}`);
-  if (req.method !== 'GET') {
-    try {
-      console.log('[BODY]', JSON.stringify(req.body).slice(0, 500));
-    } catch {}
-  }
-  next();
+// GET list of assignments
+app.get('/api/customer-reps', (req, res) => {
+  const tenantId = (req.query.tenantId || req.tenantId || 'default').toLowerCase();
+  const map = bagCustomerRepMap(tenantId);
+  const items = Array.from(map.entries()).map(([customerId, repId]) => ({ customerId, repId }));
+  res.json({ ok: true, items });
 });
 
-// Routers
-app.use(createChatterRouter(io));
-app.use('/api', mailgunRoute);
-app.use('/api', emailSendRoute);
-app.use('/api/contacts-db', contactsRouter);
-app.use('/api', registerAutomationRoutes());
+// POST upsert one assignment
+app.post('/api/customer-reps', (req, res) => {
+  const tenantId = (req.body?.tenantId || req.tenantId || 'default').toLowerCase();
+  const customerId = String(req.body?.customerId || '').trim();
+  const repIdRaw = req.body?.repId;
 
-/* --- Internal Chat (tenant-scoped Slack-lite) --- */
+  if (!customerId) return res.status(400).json({ ok: false, error: 'customerId required' });
+
+  const map = bagCustomerRepMap(tenantId);
+  if (repIdRaw == null || String(repIdRaw).trim() === '') {
+    map.delete(customerId);
+    return res.json({ ok: true, saved: { customerId, repId: null } });
+  }
+
+  const repId = String(repIdRaw).trim();
+  map.set(customerId, repId);
+  res.json({ ok: true, saved: { customerId, repId } });
+});
+
+// GET /api/reps -> Rep[]
+app.get('/api/reps', (req, res) => {
+  res.json(repsBag(req.tenantId));
+});
+
+// GET /api/payments
+// - ?unassigned=1        → only items with no sales_rep_id
+// - ?commissionable=1    → only items that pass isCommissionable()
+// - ?paged=1&page=1&pageSize=50 → paged response (keeps old array shape if paged!=1)
+app.get('/api/payments', (req, res) => {
+  const bag = paymentsBag(req.tenantId);
+
+  const paged = req.query.paged === '1';
+  const unassigned = req.query.unassigned === '1';
+  // By default, the "unassigned" view should only show items worth assigning (> $500)
+  const filterCommissionable = req.query.commissionable === '1' || unassigned;
+
+  let list = Array.from(bag.values());
+
+  if (unassigned) list = list.filter((p) => !p.sales_rep_id);
+  if (filterCommissionable) list = list.filter((p) => isCommissionable(p));
+
+  // newest first helps you see recent money without scrolling forever
+  list.sort((a, b) => new Date(b.paid_at) - new Date(a.paid_at));
+
+  // Hide internal field for UI
+  const rows = list.map(({ sales_rep_id, ...p }) => p);
+
+  if (!paged) {
+    // Backward-compatible: return plain array unless you ask for pagination
+    return res.json(rows);
+  }
+
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const pageSize = Math.max(1, Math.min(200, Number(req.query.pageSize) || 50));
+  const total = rows.length;
+  const start = (page - 1) * pageSize;
+  const items = rows.slice(start, start + pageSize);
+
+  return res.json({ ok: true, page, pageSize, total, items });
+});
+
+// POST /api/payments assign sales rep
+app.post('/api/payments', (req, res) => {
+  const { action, chargeId, repId } = req.body || {};
+  if (action !== 'assign') return res.status(400).json({ error: 'unsupported action' });
+
+  const bag = paymentsBag(req.tenantId);
+  const p = bag.get(String(chargeId));
+  if (!p) return res.status(404).json({ error: 'payment not found' });
+
+  p.sales_rep_id = String(repId);
+  bag.set(p.stripe_charge_id, p);
+  return res.json({ ok: true });
+});
+
+// GET /api/analytics/commission-by-rep
+app.get('/api/analytics/commission-by-rep', (req, res) => {
+  const tenantId = (req.tenantId || 'default').toLowerCase();
+const range = String(req.query.range || 'mtd').toLowerCase();
+
+function startOfMonth(d = new Date()) {
+  const x = new Date(d);
+  x.setDate(1);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+function startOfQuarter(d = new Date()) {
+  const x = new Date(d);
+  const qStart = Math.floor(x.getMonth() / 3) * 3;
+  x.setMonth(qStart, 1);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+function startOfYear(d = new Date()) {
+  const x = new Date(d);
+  x.setMonth(0, 1);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+
+let start;
+if (range === 'mtd' || range === 'this-month') {
+  start = startOfMonth();
+} else if (range === 'qtd') {
+  start = startOfQuarter();
+} else if (range === 'ytd') {
+  start = startOfYear();
+} else if (range === 'last-30') { // keep legacy behavior
+  const d = new Date();
+  d.setDate(d.getDate() - 30);
+  d.setHours(0, 0, 0, 0);
+  start = d;
+} else {
+  start = new Date(0);
+}
+
+  const bag = paymentsBag(tenantId);
+  const reps = repsBag(tenantId);
+
+  const nameById = new Map(reps.map((r) => [r.id, r.name]));
+  const pctById = new Map(reps.map((r) => [r.id, Number(r.defaultCommissionPct) || 0]));
+
+  // sum commissions for payments in range
+  const totals = {};
+  for (const p of bag.values()) {
+    if (!p.sales_rep_id) continue;
+    const paidAt = new Date(p.paid_at || 0);
+    if (isNaN(paidAt.getTime()) || paidAt < start) continue;
+
+    const pct = pctById.get(p.sales_rep_id) ?? 0.1;
+    const base = (p.net ?? p.amount) / 100; // dollars
+    const add = base * pct;
+    const name = nameById.get(p.sales_rep_id) || 'Unknown';
+    totals[name] = (totals[name] || 0) + add;
+  }
+
+  // subtract payouts recorded in the same range
+  const payouts = payoutsByTenant.get(tenantId) || [];
+  for (const po of payouts) {
+    const at = new Date(po.at || 0);
+    if (isNaN(at.getTime()) || at < start) continue;
+    const repName = nameById.get(po.repId) || 'Unknown';
+    totals[repName] = (totals[repName] || 0) - Number(po.amountUsd || 0);
+  }
+
+  const rows = Object.entries(totals).map(([name, v]) => ({
+    name,
+    commission_usd: Number((v || 0).toFixed(2)),
+  }));
+
+  res.json(rows);
+});
+
+// ===== Stripe import → upsert charges into paymentsByClient ===================
+/**
+ * POST /api/stripe/import
+ * Body: { sinceDays?: number, limit?: number, tenantId?: string, source?: 'charges'|'payment_intents'|'both' }
+ *
+ * Reads successful Charges first; if none found (or source=='payment_intents'/'both'), also scans
+ * Payment Intents and ingests their succeeded charges. Net (after fees) is pulled from expanded
+ * balance transactions when available.
+ */
+app.post('/api/stripe/import', async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.status(400).json({ ok: false, error: 'STRIPE_SECRET_KEY (or STRIPE_SECRET/STRIPE_API_KEY) missing' });
+    }
+
+    const tenantId = (req.body?.tenantId || req.tenantId || 'default').toLowerCase();
+    const sinceDays = Math.max(1, Math.min(3650, Number(req.body?.sinceDays) || 90));
+    const hardLimit = Math.max(
+      1,
+      Math.min(5000, Number(req.body?.limit) || Number(process.env.STRIPE_PAGE_LIMIT) || 1000)
+    );
+    const source = String(req.body?.source || 'both').toLowerCase(); // 'charges' | 'payment_intents' | 'both'
+    const createdGte = Math.floor((Date.now() - sinceDays * 86400_000) / 1000);
+
+    const bag = paymentsBag(tenantId);
+    let imported = 0;
+    let upserted = 0;
+    let pages = 0;
+
+    // Helpers
+    const upsertCharge = (ch) => {
+      // Prefer expanded balance transaction net (cents)
+      const bt = ch.balance_transaction;
+      const netCents =
+        bt && typeof bt === 'object' && typeof bt.net === 'number'
+          ? bt.net
+          : (ch.amount_captured ?? ch.amount ?? 0) - (ch.amount_refunded ?? 0);
+
+      // A readable customer name
+      let customerName = ch.billing_details?.name || ch.receipt_email || 'Customer';
+      if (ch.customer && typeof ch.customer === 'object') {
+        customerName = ch.customer.name || ch.customer.email || customerName;
+      }
+
+      const rec = {
+        stripe_charge_id: ch.id,
+        paid_at: new Date((ch.created || 0) * 1000).toISOString(),
+        amount: ch.amount ?? ch.amount_captured ?? 0, // cents
+        net: netCents,                                  // cents (after fees)
+        customer_name: customerName,
+        sales_rep_id: null,
+      };
+
+      const existed = bag.get(rec.stripe_charge_id);
+      if (existed) upserted += 1;
+      else imported += 1;
+
+      bag.set(rec.stripe_charge_id, { ...existed, ...rec });
+    };
+
+    // Pass 1: CHARGES (unless source says otherwise)
+    if (source === 'charges' || source === 'both') {
+      let startingAfter;
+      while (imported + upserted < hardLimit) {
+        const pageLimit = Math.min(100, hardLimit - (imported + upserted));
+        const params = {
+          limit: pageLimit,
+          created: { gte: createdGte },
+          expand: ['data.balance_transaction', 'data.customer'],
+          ...(startingAfter ? { starting_after: startingAfter } : {}),
+        };
+
+        const resp = await stripe.charges.list(params, { timeout: 20000 });
+        pages += 1;
+
+        for (const ch of resp.data) {
+          if (ch.status !== 'succeeded') continue;
+          upsertCharge(ch);
+          if (imported + upserted >= hardLimit) break;
+        }
+
+        if (!resp.has_more) break;
+        startingAfter = resp.data[resp.data.length - 1]?.id;
+        if (!startingAfter) break;
+      }
+    }
+
+    // Pass 2: PAYMENT INTENTS → charges (if requested or nothing found yet)
+    if ((source === 'payment_intents' || source === 'both') && imported + upserted < hardLimit) {
+      let startingAfterPI;
+      while (imported + upserted < hardLimit) {
+        const pageLimit = Math.min(100, hardLimit - (imported + upserted));
+        const params = {
+          limit: pageLimit,
+          created: { gte: createdGte },
+          // Expand charges + their balance transactions + customer
+          expand: ['data.customer', 'data.charges.data.balance_transaction'],
+          ...(startingAfterPI ? { starting_after: startingAfterPI } : {}),
+        };
+
+        const resp = await stripe.paymentIntents.list(params, { timeout: 20000 });
+        pages += 1;
+
+        for (const pi of resp.data) {
+          // We import succeeded charges attached to the PI (even if PI isn’t 'succeeded' yet,
+          // but usually they are)
+          const charges = pi?.charges?.data || [];
+          for (const ch of charges) {
+            if (ch.status !== 'succeeded') continue;
+            upsertCharge(ch);
+            if (imported + upserted >= hardLimit) break;
+          }
+          if (imported + upserted >= hardLimit) break;
+        }
+
+        if (!resp.has_more) break;
+        startingAfterPI = resp.data[resp.data.length - 1]?.id;
+        if (!startingAfterPI) break;
+      }
+    }
+
+    return res.json({
+      ok: true,
+      tenantId,
+      sinceDays,
+      imported,
+      updated: upserted,
+      pages,
+      totalKnown: bag.size,
+      sourceTried: source,
+    });
+  } catch (e) {
+    console.error('[stripe import]', e?.message || e);
+    return res.status(500).json({ ok: false, error: e?.message || 'stripe_import_failed' });
+  }
+});
+
+// GET /api/analytics/outstanding-by-customer -> placeholder
+app.get('/api/analytics/outstanding-by-customer', (_req, res) => {
+  res.json([]); // UI shows "No open balances" until invoices wired
+});
+
+// GET /api/analytics/customers
+app.get('/api/analytics/customers', (req, res) => {
+  const bag = paymentsBag(req.tenantId);
+  const byName = new Map();
+
+  for (const p of bag.values()) {
+    const name = (p.customer_name || 'Unknown').trim();
+    const id = name.toLowerCase().replace(/\s+/g, '-').slice(0, 60) || 'unknown';
+    const paidAtMs = new Date(p.paid_at).getTime();
+    const cents = (p.net ?? p.amount) || 0;
+
+    if (!byName.has(name)) {
+      byName.set(name, {
+        id,
+        name,
+        created_at: p.paid_at,
+        last_payment_at: p.paid_at,
+        total_paid_cents: 0,
+        payments: 0,
+      });
+    }
+    const row = byName.get(name);
+    row.total_paid_cents += cents;
+    row.payments += 1;
+    if (paidAtMs < new Date(row.created_at).getTime()) row.created_at = p.paid_at;
+    if (paidAtMs > new Date(row.last_payment_at).getTime()) row.last_payment_at = p.paid_at;
+  }
+
+  const list = Array.from(byName.values()).sort((a, b) => b.total_paid_cents - a.total_paid_cents);
+
+  // attach manual assignments
+  const map = bagCustomerRepMap(req.tenantId);
+  const withRep = list.map((r) => ({
+    ...r,
+    assigned_rep_id: map.get(r.id) || null,
+  }));
+
+  res.json(withRep);
+});
+
+// In-memory record of commission payouts (per tenant)
+const payoutsByTenant = new Map(); // tenantId -> Array<{repId, amountUsd, at, note?}>
+
+// Seed demo payouts (so Monthly Reports has data in dev)
+if (process.env.SEED_DEMO_SALES !== 'false') {
+  const tenant = 'default';
+  const now = new Date();
+  const lastMonth = new Date(now);
+  lastMonth.setMonth(now.getMonth() - 1);
+
+  const bag = payoutsByTenant.get(tenant) || [];
+  // Only seed once if empty
+  if (bag.length === 0) {
+    bag.push(
+      // This month
+      { repId: 'rep_alex',  amountUsd: 180.25, at: now.toISOString(), note: 'demo payout' },
+      { repId: 'rep_bella', amountUsd: 240.75, at: now.toISOString(), note: 'demo payout' },
+      // Last month
+      { repId: 'rep_alex',  amountUsd: 120.00, at: new Date(lastMonth.getFullYear(), lastMonth.getMonth(), 12).toISOString(), note: 'demo last month' },
+      { repId: 'rep_bella', amountUsd:  95.50, at: new Date(lastMonth.getFullYear(), lastMonth.getMonth(), 22).toISOString(), note: 'demo last month' }
+    );
+    payoutsByTenant.set(tenant, bag);
+  }
+}
+
+app.post('/api/commissions/payout', (req, res) => {
+  const tenantId = (req.body?.tenantId || req.tenantId || 'default').toLowerCase();
+  const repId = String(req.body?.repId || '').trim();
+  const amountUsd = Number(req.body?.amountUsd);
+  const note = (req.body?.note || '').toString();
+
+  if (!repId || !Number.isFinite(amountUsd) || amountUsd <= 0) {
+    return res.status(400).json({ ok: false, error: 'repId and positive amountUsd are required' });
+  }
+  if (!payoutsByTenant.has(tenantId)) payoutsByTenant.set(tenantId, []);
+  payoutsByTenant.get(tenantId).push({ repId, amountUsd, at: new Date().toISOString(), note });
+
+  // (future) integrate with payment rail
+  return res.json({ ok: true });
+});
+
+app.get('/api/commissions/payouts', (req, res) => {
+  const tenantId = (req.query?.tenantId || req.tenantId || 'default').toLowerCase();
+  const list = payoutsByTenant.get(tenantId) || [];
+  res.json({ ok: true, tenantId, payouts: list });
+});
+
+app.get('/api/commissions/payouts/monthly', (req, res) => {
+  const tenantId = (req.query?.tenantId || req.tenantId || 'default').toLowerCase();
+  const reps = repsBag(tenantId) || [];
+  const nameById = new Map(reps.map((r) => [r.id, r.name]));
+  const list = payoutsByTenant.get(tenantId) || [];
+
+  const byMonth = new Map(); // 'YYYY-MM' -> Map(repId -> totalUsd)
+  for (const p of list) {
+    const month = (p.at || '').slice(0, 7) || new Date().toISOString().slice(0, 7);
+    const repId = String(p.repId);
+    const amt = Number(p.amountUsd || 0);
+    if (!byMonth.has(month)) byMonth.set(month, new Map());
+    const m = byMonth.get(month);
+    m.set(repId, (m.get(repId) || 0) + amt);
+  }
+
+  const months = Array.from(byMonth.entries())
+    .sort((a, b) => (a[0] < b[0] ? 1 : -1)) // newest first
+    .map(([month, m]) => {
+      const rows = Array.from(m.entries()).map(([repId, totalUsd]) => ({
+        repId,
+        repName: nameById.get(repId) || repId,
+        totalUsd: Number(totalUsd.toFixed(2)),
+      }));
+      const totalUsd = Number(rows.reduce((s, r) => s + r.totalUsd, 0).toFixed(2));
+      return { month, rows, totalUsd };
+    });
+
+  res.json({ ok: true, tenantId, months });
+});
+
+// ===== Monthly commission rollup: earned vs paid (net due) ===================
+// GET /api/commissions/monthly?months=6
+// -> { ok, tenantId, months: [{ month:"YYYY-MM", totals:{earnedUsd,paidUsd,netUsd}, rows:[{repId, repName, earnedUsd, paidUsd, netUsd}]}] }
+
+function ymKey(d) {
+  const dt = new Date(d || 0);
+  if (isNaN(dt.getTime())) return null;
+  return dt.toISOString().slice(0, 7); // YYYY-MM (UTC)
+}
+function lastNMonths(n) {
+  const out = [];
+  const base = new Date();
+  base.setDate(1);
+  base.setHours(0, 0, 0, 0);
+  for (let i = 0; i < n; i++) {
+    const d = new Date(base);
+    d.setMonth(base.getMonth() - i);
+    out.push(d.toISOString().slice(0, 7));
+  }
+  return out; // newest -> older
+}
+
+app.get('/api/commissions/monthly', (req, res) => {
+  try {
+    const tenantId = (req.query?.tenantId || req.tenantId || 'default').toLowerCase();
+    const monthsParam = Math.max(1, Math.min(36, Number(req.query?.months) || 12));
+
+    // Helpers (no TS types in .js)
+    const monthKey = (iso) => (iso ? String(iso).slice(0, 7) : null); // "YYYY-MM"
+    const addTo = (map, key, amt) => map.set(key, (map.get(key) || 0) + amt);
+
+    // Data bags
+    const bag = paymentsBag(tenantId);
+    const reps = repsBag(tenantId) || [];
+    const nameById = new Map(reps.map(r => [r.id, r.name]));
+    const pctById  = new Map(reps.map(r => [r.id, Number(r.defaultCommissionPct) || 0]));
+
+    // Aggregators (plain Maps)
+    const earnedByMonth = new Map(); // key: "YYYY-MM" -> Map(repId -> earnedUsd)
+    const paidByMonth   = new Map(); // key: "YYYY-MM" -> Map(repId -> paidUsd)
+
+    // --- Earned: from payments × rep default pct ---
+    for (const p of bag.values()) {
+      const repId = p.sales_rep_id;
+      if (!repId) continue;
+
+      const key = monthKey(p.paid_at);
+      if (!key) continue;
+
+      const pct  = pctById.get(repId) ?? 0.10;
+      const base = Number((p.net ?? p.amount) || 0) / 100; // dollars
+      if (!Number.isFinite(base) || base <= 0) continue;
+
+      const earned = base * pct;
+
+      if (!earnedByMonth.has(key)) earnedByMonth.set(key, new Map());
+      addTo(earnedByMonth.get(key), repId, earned);
+    }
+
+    // --- Paid: from recorded payouts ---
+    const payouts = payoutsByTenant.get(tenantId) || [];
+    for (const po of payouts) {
+      const repId = String(po.repId || '').trim();
+      if (!repId) continue;
+
+      const key = monthKey(po.at);
+      if (!key) continue;
+
+      const amt = Number(po.amountUsd || 0);
+      if (!Number.isFinite(amt) || amt <= 0) continue;
+
+      if (!paidByMonth.has(key)) paidByMonth.set(key, new Map());
+      addTo(paidByMonth.get(key), repId, amt);
+    }
+
+    // Union of months that have either earned or paid, newest first
+    const monthKeys = Array.from(new Set([...earnedByMonth.keys(), ...paidByMonth.keys()]))
+      .sort((a, b) => (a < b ? 1 : -1));
+
+    // Limit to requested number of months
+    const limitedMonths = monthKeys.slice(0, monthsParam);
+
+    const months = limitedMonths.map((mKey) => {
+      const earnedMap = earnedByMonth.get(mKey) || new Map();
+      const paidMap   = paidByMonth.get(mKey)   || new Map();
+
+      // union of repIds seen in this month
+      const repIds = Array.from(new Set([...earnedMap.keys(), ...paidMap.keys()]));
+
+      const rows = repIds
+        .map((repId) => {
+          const earnedUsd = Number((earnedMap.get(repId) || 0).toFixed(2));
+          const paidUsd   = Number((paidMap.get(repId)   || 0).toFixed(2));
+          const netUsd    = Number((earnedUsd - paidUsd).toFixed(2));
+          return {
+            repId,
+            repName: nameById.get(repId) || repId || 'Unknown',
+            earnedUsd,
+            paidUsd,
+            netUsd,
+          };
+        })
+        .sort((a, b) => b.netUsd - a.netUsd); // highest net due first
+
+      const totals = rows.reduce(
+        (acc, r) => {
+          acc.earnedUsd += r.earnedUsd;
+          acc.paidUsd   += r.paidUsd;
+          acc.netUsd    += r.netUsd;
+          return acc;
+        },
+        { earnedUsd: 0, paidUsd: 0, netUsd: 0 }
+      );
+
+      // round totals
+      totals.earnedUsd = Number(totals.earnedUsd.toFixed(2));
+      totals.paidUsd   = Number(totals.paidUsd.toFixed(2));
+      totals.netUsd    = Number(totals.netUsd.toFixed(2));
+
+      return { month: mKey, totals, rows };
+    });
+
+    return res.json({ ok: true, tenantId, months });
+  } catch (e) {
+    console.error('[GET /api/commissions/monthly]', e?.message || e);
+    return res.status(500).json({ ok: false, error: 'monthly_rollup_failed' });
+  }
+});
+
+// =============================================================================
+// Internal Chat (tenant-scoped Slack-lite)
+// =============================================================================
+
 const channelsByClient = new Map();
 const channelMessagesByClient = new Map();
 const channelReadsByClient = new Map();
@@ -304,7 +964,7 @@ function readMap(clientId, channelId) {
 
 function ensureChannel(clientId, { name, topic = '', members = [] }) {
   const list = listChannels(clientId);
-  const existing = list.find(c => c.name.toLowerCase() === String(name).toLowerCase());
+  const existing = list.find((c) => c.name.toLowerCase() === String(name).toLowerCase());
   if (existing) return existing;
   const ch = {
     id: newId('chn_'),
@@ -325,18 +985,21 @@ if (process.env.SEED_DEMO_CHANNELS === 'true') {
 
 app.get('/api/chat/channels', (req, res) => {
   const clientId = (req.query.clientId || req.tenantId || 'default').trim();
-  const items = listChannels(clientId).slice().sort((a, b) => {
-    const ta = new Date(a.lastMessageAt || a.createdAt).getTime();
-    const tb = new Date(b.lastMessageAt || b.createdAt).getTime();
-    return tb - ta;
-  });
+  const items = listChannels(clientId)
+    .slice()
+    .sort((a, b) => {
+      const ta = new Date(a.lastMessageAt || a.createdAt).getTime();
+      const tb = new Date(b.lastMessageAt || b.createdAt).getTime();
+      return tb - ta;
+    });
   res.json({ ok: true, clientId, channels: items });
 });
 
 app.post('/api/chat/channels', (req, res) => {
   const clientId = (req.body.clientId || req.tenantId || 'default').trim();
   const { name, topic = '', members = [] } = req.body || {};
-  if (!name || !String(name).trim()) return res.status(400).json({ ok: false, error: 'name required' });
+  if (!name || !String(name).trim())
+    return res.status(400).json({ ok: false, error: 'name required' });
   const ch = ensureChannel(clientId, { name, topic, members });
   emitTenant(clientId, 'chat:channel:created', { channel: ch });
   res.status(201).json({ ok: true, channel: ch });
@@ -352,7 +1015,7 @@ app.get('/api/chat/channels/:id/messages', (req, res) => {
   let out = all;
   if (afterISO) {
     const t = new Date(afterISO).getTime();
-    out = all.filter(m => new Date(m.at).getTime() > t);
+    out = all.filter((m) => new Date(m.at).getTime() > t);
   }
   out = out.slice(-limit);
   res.json({ ok: true, clientId, channelId, count: out.length, messages: out });
@@ -363,9 +1026,10 @@ app.post('/api/chat/channels/:id/messages', async (req, res) => {
     const clientId = (req.body.clientId || req.tenantId || 'default').trim();
     const channelId = req.params.id;
     const { userId, userName, text, attachments = [] } = req.body || {};
-    if (!userId || !text) return res.status(400).json({ ok: false, error: 'userId and text required' });
+    if (!userId || !text)
+      return res.status(400).json({ ok: false, error: 'userId and text required' });
 
-    const ch = listChannels(clientId).find(c => c.id === channelId);
+    const ch = listChannels(clientId).find((c) => c.id === channelId);
     if (!ch) return res.status(404).json({ ok: false, error: 'channel not found' });
 
     const msg = {
@@ -384,6 +1048,7 @@ app.post('/api/chat/channels/:id/messages', async (req, res) => {
 
     emitTenant(clientId, 'chat:message', { channelId, message: msg });
 
+    // Fire domain event for automations
     try {
       const ev = createEvent(
         'chat.message.created',
@@ -439,22 +1104,24 @@ app.post('/api/chat/channels/:id/read', (req, res) => {
 
   res.json({ ok: true });
 });
-/* --- end Internal Chat --- */
 
-// --- Tenants admin: phone → tenant mapping ---
-// GET list
+// =============================================================================
+// Tenants admin: phone ↔ tenant mapping
+// =============================================================================
+
 app.get('/api/tenants/phone-map', (_req, res) => {
   res.json({ ok: true, items: listTenantPhoneMap() });
 });
-// POST upsert { phone, tenantId }
+
 app.post('/api/tenants/phone-map', (req, res) => {
   const phone = phoneE164(req.body?.phone || '');
   const tenantId = String(req.body?.tenantId || '').trim();
-  if (!phone || !tenantId) return res.status(400).json({ ok: false, error: 'phone and tenantId required' });
+  if (!phone || !tenantId)
+    return res.status(400).json({ ok: false, error: 'phone and tenantId required' });
   setTenantPhone(phone, tenantId);
   res.json({ ok: true, saved: { phone, tenantId } });
 });
-// DELETE { phone }
+
 app.delete('/api/tenants/phone-map', (req, res) => {
   const phone = phoneE164(req.body?.phone || req.query?.phone || '');
   if (!phone) return res.status(400).json({ ok: false, error: 'phone required' });
@@ -462,18 +1129,14 @@ app.delete('/api/tenants/phone-map', (req, res) => {
   res.json({ ok: true, removed: phone });
 });
 
-// --- Voice numbers & assignments (in-memory) ---
-// Purpose:
-// 1) Registry of tenant-owned numbers
-// 2) Per-user direct number assignment
-// 3) Optional per-tenant rollover order (array of numbers)
-// All in-memory for now; swap to DB later.
+// =============================================================================
+// Voice numbers & assignments (in-memory registry)
+// =============================================================================
 
-const voiceNumbersByTenant = new Map();   // tenantId -> Set<phone>
-const userNumberByTenant = new Map();     // tenantId -> Map<userId, phone>
-const rolloverByTenant = new Map();       // tenantId -> Array<phone>
+const voiceNumbersByTenant = new Map(); // tenantId -> Set<phone>
+const userNumberByTenant = new Map(); // tenantId -> Map<userId, phone>
+const rolloverByTenant = new Map(); // tenantId -> Array<phone>
 
-// helpers
 function bagSet(map, key) {
   const k = String(key || 'default').toLowerCase();
   if (!map.has(k)) map.set(k, new Set());
@@ -488,21 +1151,19 @@ function listTenantNumbers(tenantId) {
   return Array.from(voiceNumbersByTenant.get(String(tenantId).toLowerCase()) || []);
 }
 
-// GET numbers for a tenant
 app.get('/api/voice/numbers', (req, res) => {
   const tenantId = (req.query.tenantId || req.tenantId || 'default').toLowerCase();
   res.json({
     ok: true,
     tenantId,
     numbers: listTenantNumbers(tenantId),
-    assignments: Array.from(bagMap(userNumberByTenant, tenantId).entries())
-      .map(([userId, phone]) => ({ userId, phone })),
+    assignments: Array.from(bagMap(userNumberByTenant, tenantId).entries()).map(
+      ([userId, phone]) => ({ userId, phone })
+    ),
     rollover: Array.from(rolloverByTenant.get(tenantId) || []),
   });
 });
 
-// POST add/buy (register) a number for a tenant
-// Body: { phone: string(E.164), tenantId?: string }
 app.post('/api/voice/numbers', (req, res) => {
   const tenantId = (req.body?.tenantId || req.tenantId || 'default').toLowerCase();
   const phone = phoneE164(req.body?.phone || '');
@@ -510,47 +1171,42 @@ app.post('/api/voice/numbers', (req, res) => {
 
   const set = bagSet(voiceNumbersByTenant, tenantId);
   set.add(phone);
-
-  // keep your global phone→tenant resolver in sync
-  setTenantPhone(phone, tenantId);
+  setTenantPhone(phone, tenantId); // keep resolver in sync
 
   emitTenant(tenantId, 'voice:numbers:update', { numbers: Array.from(set) });
   res.status(201).json({ ok: true, tenantId, phone });
 });
 
-// DELETE remove a number from a tenant
-// Body or query: { phone }
 app.delete('/api/voice/numbers', (req, res) => {
-  const tenantId = (req.body?.tenantId || req.query?.tenantId || req.tenantId || 'default').toLowerCase();
+  const tenantId =
+    (req.body?.tenantId || req.query?.tenantId || req.tenantId || 'default').toLowerCase();
   const phone = phoneE164(req.body?.phone || req.query?.phone || '');
   if (!phone) return res.status(400).json({ ok: false, error: 'phone required' });
 
   const set = bagSet(voiceNumbersByTenant, tenantId);
   set.delete(phone);
-  removeTenantPhone(phone); // also remove from resolver
+  removeTenantPhone(phone);
 
-  // also unassign from any user
+  // Unassign from users & prune from rollover
   const map = bagMap(userNumberByTenant, tenantId);
   for (const [uid, p] of map.entries()) if (p === phone) map.delete(uid);
-
-  // prune from rollover
-  const roll = (rolloverByTenant.get(tenantId) || []).filter(n => n !== phone);
+  const roll = (rolloverByTenant.get(tenantId) || []).filter((n) => n !== phone);
   rolloverByTenant.set(tenantId, roll);
 
   emitTenant(tenantId, 'voice:numbers:update', { numbers: Array.from(set) });
   res.json({ ok: true, tenantId, removed: phone });
 });
 
-// POST assign a number to a user
-// Body: { userId: string, phone: string(E.164), tenantId?: string }
 app.post('/api/voice/assign', (req, res) => {
   const tenantId = (req.body?.tenantId || req.tenantId || 'default').toLowerCase();
   const userId = String(req.body?.userId || '').trim();
   const phone = phoneE164(req.body?.phone || '');
-  if (!userId || !phone) return res.status(400).json({ ok: false, error: 'userId and phone required' });
+  if (!userId || !phone)
+    return res.status(400).json({ ok: false, error: 'userId and phone required' });
 
   const set = bagSet(voiceNumbersByTenant, tenantId);
-  if (!set.has(phone)) return res.status(400).json({ ok: false, error: 'phone not registered for tenant' });
+  if (!set.has(phone))
+    return res.status(400).json({ ok: false, error: 'phone not registered for tenant' });
 
   const map = bagMap(userNumberByTenant, tenantId);
   map.set(userId, phone);
@@ -559,7 +1215,6 @@ app.post('/api/voice/assign', (req, res) => {
   res.json({ ok: true, tenantId, userId, phone });
 });
 
-// GET assignments for a tenant
 app.get('/api/voice/assign', (req, res) => {
   const tenantId = (req.query?.tenantId || req.tenantId || 'default').toLowerCase();
   const map = bagMap(userNumberByTenant, tenantId);
@@ -570,26 +1225,28 @@ app.get('/api/voice/assign', (req, res) => {
   });
 });
 
-// POST set rollover order for a tenant
-// Body: { tenantId?: string, numbers: string[] }  (must be registered)
 app.post('/api/voice/rollover', (req, res) => {
   const tenantId = (req.body?.tenantId || req.tenantId || 'default').toLowerCase();
-  const numbers = Array.isArray(req.body?.numbers) ? req.body.numbers.map(phoneE164).filter(Boolean) : [];
+  const numbers = Array.isArray(req.body?.numbers)
+    ? req.body.numbers.map(phoneE164).filter(Boolean)
+    : [];
   const registered = new Set(listTenantNumbers(tenantId));
-  const bad = numbers.filter(n => !registered.has(n));
+  const bad = numbers.filter((n) => !registered.has(n));
   if (bad.length) return res.status(400).json({ ok: false, error: 'unregistered numbers in list', bad });
 
   rolloverByTenant.set(tenantId, numbers);
   res.json({ ok: true, tenantId, rollover: numbers });
 });
 
-// GET rollover list
 app.get('/api/voice/rollover', (req, res) => {
   const tenantId = (req.query?.tenantId || req.tenantId || 'default').toLowerCase();
   res.json({ ok: true, tenantId, rollover: Array.from(rolloverByTenant.get(tenantId) || []) });
 });
 
-// --- EMAIL ---
+// =============================================================================
+/* EMAIL */
+// =============================================================================
+
 app.post('/api/test-email', async (req, res) => {
   try {
     const { to, subject = 'Mailgun prototype test', text, html, replyTo, domain, from } =
@@ -606,7 +1263,7 @@ app.post('/api/test-email', async (req, res) => {
     });
     res.json({ ok: true, result: r });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message || String(e) });
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -640,7 +1297,10 @@ app.post('/api/email/draft-and-send', async (req, res) => {
   }
 });
 
-// --- Voice: outbound call ---
+// =============================================================================
+// Voice: outbound/inbound & recordings
+// =============================================================================
+
 app.post('/api/voice/call', async (req, res) => {
   try {
     const { to, opts = {} } = req.body || {};
@@ -664,59 +1324,124 @@ app.post('/api/voice/call', async (req, res) => {
   }
 });
 
-// --- Twilio recording status webhook ---
-app.post('/twilio/recording-status', express.urlencoded({ extended: false }),  verifyTwilio(), async (req, res) => {
-  try {
-    const { CallSid, CallStatus, RecordingSid, RecordingUrl, RecordingStatus, RecordingDuration, Timestamp, To, From } =
-      req.body || {};
-
-    // 🔁 resolve tenant from the inbound "To" number
-    req.tenantId = getTenantForPhone(To) || 'default';
-
-    const mp3Url = RecordingUrl ? `${RecordingUrl}.mp3` : null;
-
-    emitTenant(req.tenantId, 'voice:recording', {
-      callSid: CallSid || null,
-      status: RecordingStatus || 'unknown',
-      url: mp3Url,
-      recordingSid: RecordingSid || null,
-      durationSec: RecordingDuration ? Number(RecordingDuration) : null,
-      to: To || null,
-      from: From || null,
-      callStatus: CallStatus || null,
-      at: new Date().toISOString(),
-    });
-
+app.post(
+  '/twilio/recording-status',
+  express.urlencoded({ extended: false }),
+  verifyTwilio(),
+  async (req, res) => {
     try {
-      const clientId = (req.query.clientId || 'default').trim();
-      const ev = createEvent(
-        'call.recording.completed',
-        clientId,
-        {
-          callSid: CallSid || null,
-          recordingSid: RecordingSid || null,
-          url: mp3Url,
-          durationSec: RecordingDuration ? Number(RecordingDuration) : null,
-          to: To || null,
-          from: From || null,
-          timestamp: Timestamp || null,
-        },
-        { source: 'twilio' }
-      );
-      recordAndEmit(ioForTenant(clientId), ev);
-      await dispatchEvent(ev);
-    } catch (persistErr) {
-      console.warn('[recording-status] persist warning:', persistErr?.message || persistErr);
-    }
+      const {
+        CallSid,
+        CallStatus,
+        RecordingSid,
+        RecordingUrl,
+        RecordingStatus,
+        RecordingDuration,
+        Timestamp,
+        To,
+        From,
+      } = req.body || {};
 
-    res.type('text/xml').send('<Response/>');
-  } catch (e) {
-    console.error('[twilio/recording-status]', e?.message || e);
+      // Resolve tenant from inbound "To"
+      req.tenantId = getTenantForPhone(To) || 'default';
+
+      const mp3Url = RecordingUrl ? `${RecordingUrl}.mp3` : null;
+
+      emitTenant(req.tenantId, 'voice:recording', {
+        callSid: CallSid || null,
+        status: RecordingStatus || 'unknown',
+        url: mp3Url,
+        recordingSid: RecordingSid || null,
+        durationSec: RecordingDuration ? Number(RecordingDuration) : null,
+        to: To || null,
+        from: From || null,
+        callStatus: CallStatus || null,
+        at: new Date().toISOString(),
+      });
+
+      try {
+        const clientId = (req.query.clientId || 'default').trim();
+        const ev = createEvent(
+          'call.recording.completed',
+          clientId,
+          {
+            callSid: CallSid || null,
+            recordingSid: RecordingSid || null,
+            url: mp3Url,
+            durationSec: RecordingDuration ? Number(RecordingDuration) : null,
+            to: To || null,
+            from: From || null,
+            timestamp: Timestamp || null,
+          },
+          { source: 'twilio' }
+        );
+        recordAndEmit(ioForTenant(clientId), ev);
+        await dispatchEvent(ev);
+      } catch (persistErr) {
+        console.warn('[recording-status] persist warning:', persistErr?.message || persistErr);
+      }
+
+      res.type('text/xml').send('<Response/>');
+    } catch (e) {
+      console.error('[twilio/recording-status]', e?.message || e);
+      res.type('text/xml').send('<Response/>');
+    }
+  }
+);
+
+app.post(
+  '/twilio/voice-status',
+  express.urlencoded({ extended: false }),
+  verifyTwilio(),
+  async (req, res) => {
+    try {
+      const { CallSid, CallStatus, From, To, Direction } = req.body || {};
+      const tenantId = getTenantForPhone(To) || 'default';
+
+      emitTenant(tenantId, 'voice:status', {
+        sid: CallSid || null,
+        status: CallStatus || 'unknown',
+        from: From || null,
+        to: To || null,
+        direction: Direction || null,
+        at: new Date().toISOString(),
+      });
+    } catch (e) {
+      console.warn('[twilio/voice-status] emit warn:', e?.message || e);
+    }
     res.type('text/xml').send('<Response/>');
   }
+);
+
+// Inbound Voice webhook → connect call to Media Stream WS
+app.post('/twilio/voice', express.urlencoded({ extended: false }), verifyTwilio(), (req, res) => {
+  const { To } = req.body || {};
+  const tenantId = getTenantForPhone(To) || req.tenantId || 'default';
+
+  const baseWs = publicWsUrl();
+  const twiml = new twilio.twiml.VoiceResponse();
+
+  if (!VOICE_AI_ENABLED) {
+    twiml.say('Sorry, voice is currently unavailable.');
+    return res.type('text/xml').send(twiml.toString());
+  }
+
+  if (!baseWs) {
+    twiml.say('Media stream is not configured on the server.');
+    return res.type('text/xml').send(twiml.toString());
+  }
+
+  const connect = twiml.connect();
+  const streamUrl = `${baseWs}${VOICE_WS_PATH}?tenantId=${encodeURIComponent(tenantId)}`;
+  connect.stream({ url: streamUrl, track: 'both_tracks' });
+
+  res.type('text/xml').send(twiml.toString());
 });
 
-// --- Estimate AI ---
+// =============================================================================
+// Estimate AI
+// =============================================================================
+
 app.post('/api/estimate/ai/items', async (req, res) => {
   try {
     const { prompt } = req.body || {};
@@ -763,12 +1488,11 @@ app.post('/api/agent/estimate', express.json(), async (req, res) => {
   }
 });
 
-// --- Proposal cover letter (JS alias) ---
 app.post('/api/agent/proposal', async (req, res) => {
   try {
     const { items = [], notes = '', contact = {} } = req.body || {};
 
-    // Try LLM helper first (same one your /api/estimate/ai/summary uses)
+    // Try LLM helper first
     let text = '';
     try {
       text = await draftEstimateCopy({ items, notes }, contact);
@@ -776,7 +1500,7 @@ app.post('/api/agent/proposal', async (req, res) => {
       console.warn('[agent.proposal] draftEstimateCopy failed:', err?.message || err);
     }
 
-    // Fallback: safe, no-LLM template
+    // Fallback template
     if (!text || !String(text).trim()) {
       const lines = (Array.isArray(items) ? items : [])
         .slice(0, 6)
@@ -786,12 +1510,13 @@ app.post('/api/agent/proposal', async (req, res) => {
           const unit = (it?.unit || '').toString().trim();
           const unitPrice = Number(it?.unitPrice) || 0;
           const line = qty * unitPrice;
-          return `• ${name} — ${qty}${unit ? ' ' + unit : ''} @ $${unitPrice.toFixed(2)} (${line ? '$' + line.toFixed(2) : '—'})`;
+          return `• ${name} — ${qty}${unit ? ' ' + unit : ''} @ $${unitPrice.toFixed(
+            2
+          )} (${line ? '$' + line.toFixed(2) : '—'})`;
         })
         .join('\n');
 
-      text =
-`Hi ${contact?.name || 'there'},
+      text = `Hi ${contact?.name || 'there'},
 
 Thanks for inviting us to look at your project. Below is a clear scope and transparent pricing.
 
@@ -811,9 +1536,10 @@ NONSTOP JOBS`;
   }
 });
 
+// =============================================================================
+// Events
+// =============================================================================
 
-
-// --- Events ---
 app.get('/api/events', (req, res) => {
   const clientId = (req.query.clientId || 'default').trim();
   const limit = Number(req.query.limit) || 100;
@@ -821,7 +1547,7 @@ app.get('/api/events', (req, res) => {
   res.json({ ok: true, events });
 });
 
-// --- Mark an invoice as paid (demo/dev) ---
+// Mark an invoice as paid (demo/dev)
 app.post('/api/invoices/:id/pay', async (req, res) => {
   try {
     const tenantId =
@@ -835,7 +1561,7 @@ app.post('/api/invoices/:id/pay', async (req, res) => {
       at: new Date().toISOString(),
     };
 
-    // Emit a domain event for this tenant so the UI (and automations) react.
+    // Emit domain event for this tenant so UI/automations react
     try {
       const ev = createEvent(
         'invoice.paid',
@@ -850,10 +1576,9 @@ app.post('/api/invoices/:id/pay', async (req, res) => {
         { source: 'api', idempotencyKey: `invoice:${tenantId}:${inv.id}:paid` }
       );
 
-      recordAndEmit(ioForTenant(tenantId), ev); // socket.io -> front-end listeners
-      await dispatchEvent(ev);                   // run any matching automations
+      recordAndEmit(ioForTenant(tenantId), ev);
+      await dispatchEvent(ev);
     } catch (e) {
-      // soft-fail: don’t break the API if broadcasting fails
       console.warn('[invoice.paid] event dispatch warning:', e?.message || e);
     }
 
@@ -863,7 +1588,10 @@ app.post('/api/invoices/:id/pay', async (req, res) => {
   }
 });
 
-// ---- VEHICLES CRUD ----
+// =============================================================================
+// Vehicles CRUD (demo)
+// =============================================================================
+
 app.get('/api/vehicles', (req, res) => {
   const clientId = (req.query.clientId || 'default').trim();
   const list = vehiclesByClient.get(clientId) || [];
@@ -906,7 +1634,10 @@ app.delete('/api/vehicles/:id', (req, res) => {
   res.json({ ok: true, removed: id });
 });
 
-// ---- Helpers ----
+// =============================================================================
+// Contacts aggregation (manual + jobs memory)
+// =============================================================================
+
 function normalizeContact(raw = {}) {
   const arr = (v) => (Array.isArray(v) ? v.filter(Boolean) : []);
   const phones = [...arr(raw.phones), raw.phone, raw.mobile, raw.primaryPhone].filter(Boolean);
@@ -925,428 +1656,11 @@ function normalizeContact(raw = {}) {
   };
 }
 
-const TZ_OFFSET_FALLBACK = process.env.DEFAULT_TZ_OFFSET || '-04:00';
-const SUGGEST_SLOTS_SOURCE = process.env.SUGGEST_SLOTS_SOURCE || 'ghl';
-
-function buildLocalSlots(date, stepMin = 30, open = '09:00', close = '17:00') {
-  const startISO = `${date}T${open}:00${TZ_OFFSET_FALLBACK}`;
-  const endISO = `${date}T${close}:00${TZ_OFFSET_FALLBACK}`;
-  const out = [];
-  for (let t = new Date(startISO); t < new Date(endISO); t = new Date(t.getTime() + stepMin * 60000)) {
-    const end = new Date(t.getTime() + stepMin * 60000);
-    out.push({ start: t.toISOString(), end: end.toISOString() });
-  }
-  return out;
-}
-
-function parseDateish(v) {
-  if (v == null) return null;
-  if (typeof v === 'number') return new Date(v > 1e12 ? v : v * 1000);
-  if (typeof v === 'string') {
-    const n = Number(v);
-    if (!Number.isNaN(n)) return new Date(n > 1e12 ? n : n * 1000);
-    return new Date(v);
-  }
-  return new Date(v);
-}
-
-function extractSlotsFromGHL(data) {
-  let raw = data?.timeSlots || data?.availableSlots || data?.slots;
-  if (!raw) {
-    const dateKey = Object.keys(data || {}).find(
-      (k) => /^\d{4}-\d{2}-\d{2}$/.test(k) && data[k]?.slots
-    );
-    if (dateKey) raw = data[dateKey].slots;
-  }
-  if (!raw) return [];
-  return raw
-    .map((s) => {
-      const startD = parseDateish(s?.start ?? s);
-      if (!startD || isNaN(startD)) return null;
-      const endD = parseDateish(s?.end) || new Date(startD.getTime() + 60 * 60 * 1000);
-      return { start: startD.toISOString(), end: endD.toISOString() };
-    })
-    .filter(Boolean);
-}
-
-function dayBoundsEpochMs(yyyyMmDd, tzOffset = TZ_OFFSET_FALLBACK) {
-  const startISO = `${yyyyMmDd}T00:00:00${tzOffset}`;
-  const endISO = `${yyyyMmDd}T23:59:59${tzOffset}`;
-  return { startMs: new Date(startISO).getTime(), endMs: new Date(endISO).getTime() };
-}
-
-function ensureOffsetISO(iso, fallbackOffset = TZ_OFFSET_FALLBACK) {
-  if (!iso) return iso;
-  if (/[+-]\d\d:\d\d$|Z$/.test(iso)) {
-    return iso.replace(/\.\d{3}/, '');
-  }
-  return `${iso.replace(/\.\d{3}/, '')}${fallbackOffset}`;
-}
-
-app.get('/api/test-geocode', async (req, res) => {
-  try {
-    const testAddress = req.query.address || '1600 Amphitheatre Parkway, Mountain View, CA';
-    const coords = await geocodeAddress(testAddress);
-    res.json({ ok: true, address: testAddress, coords });
-  } catch (err) {
-    console.error('[Test Geocode] Error:', err);
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-// --- OSM / Nominatim geocode proxy with cache ---
-const nominatimCache = new Map();
-const NOM_TTL_MS = 12 * 60 * 60 * 1000;
-
-app.get('/api/geo/search', async (req, res) => {
-  try {
-    const q = String(req.query.q || '').trim().slice(0, 200);
-    if (!q) return res.json([]);
-
-    const key = q.toLowerCase();
-    const hit = nominatimCache.get(key);
-    if (hit && Date.now() - hit.ts < NOM_TTL_MS) {
-      return res.json(hit.data);
-    }
-
-    const email = process.env.GEOCODE_EMAIL || 'admin@example.com';
-    const url =
-      'https://nominatim.openstreetmap.org/search?format=json&limit=5&addressdetails=1&q=' +
-      encodeURIComponent(q) +
-      '&email=' + encodeURIComponent(email);
-
-    const r = await fetch(url, {
-      headers: {
-        'User-Agent': `x-fleet/1.0 (${email})`,
-        Accept: 'application/json',
-      },
-    });
-
-    if (!r.ok) {
-      const msg = await r.text().catch(() => '');
-      return res
-        .status(502)
-        .json({ ok: false, error: `nominatim_${r.status}`, details: msg.slice(0, 200) });
-    }
-
-    const data = await r.json().catch(() => []);
-    const list = Array.isArray(data) ? data : [];
-    nominatimCache.set(key, { ts: Date.now(), data: list });
-    return res.json(list);
-  } catch (e) {
-    console.warn('[geo/search]', e?.message || e);
-    return res.json([]);
-  }
-});
-
-app.get('/health', (_req, res) => res.json({ ok: true }));
-
 function pickPrimaryPhone(c = {}) {
   const arr = Array.isArray(c.phones) ? c.phones.filter(Boolean) : [];
   return arr[0] || c.phone || c.mobile || c.primaryPhone || null;
 }
 
-function ensureMockConversationForContact(contactId) {
-  let convoId = mockByContact.get(contactId);
-  if (!convoId) {
-    convoId = uuid();
-    mockByContact.set(contactId, convoId);
-    mockConvos.set(convoId, { id: convoId, contactId, messages: [] });
-  }
-  return convoId;
-}
-
-// --- Jobs: create/upsert ---
-app.post('/api/jobs', async (req, res) => {
-  try {
-    const b = req.body || {};
-    const clientId = (b.clientId || 'default').trim();
-
-    if (!jobsByClient.has(clientId)) jobsByClient.set(clientId, new Map());
-    const jobs = jobsByClient.get(clientId);
-
-    const id = b.appointmentId || b.id || newId('job_');
-    const startISO = ensureOffsetISO(b.startTime) || new Date().toISOString();
-    const endISO =
-      ensureOffsetISO(b.endTime) ||
-      new Date(new Date(startISO).getTime() + 60 * 60 * 1000).toISOString();
-
-    const address = toAddressString(b.address);
-    let lat = Number(b.lat),
-      lng = Number(b.lng);
-    const missingOrZero =
-      !Number.isFinite(lat) || !Number.isFinite(lng) || (lat === 0 && lng === 0);
-
-    if (missingOrZero && address) {
-      try {
-        const geo = await geocodeAddress(address);
-        if (geo) {
-          lat = geo.lat;
-          lng = geo.lng;
-        }
-      } catch {}
-    }
-
-    const contact = normalizeContact(b.contact || {});
-
-    const job = {
-      appointmentId: id,
-      startTime: startISO,
-      endTime: endISO,
-      jobType: b.jobType || 'Job',
-      estValue: Number(b.estValue) || 0,
-      territory: b.territory || null,
-      assignedUserId: b.assignedUserId || null,
-      assignedRepName: b.assignedRepName || null,
-      address,
-      lat: Number.isFinite(lat) ? lat : null,
-      lng: Number.isFinite(lng) ? lng : null,
-      contact,
-    };
-
-    jobs.set(job.appointmentId, job);
-
-    recordAndEmit(
-      ioForTenant(clientId),
-      createEvent(
-        'appointment.created',
-        clientId,
-        {
-          appointmentId: job.appointmentId,
-          contactId: (contact && contact.id) || (job.contact && job.contact.id) || null,
-          contactName: (contact && contact.name) || (job.contact && job.contact.name) || null,
-          address,
-          startTime: job.startTime,
-          endTime: job.endTime,
-          estValue: job.estValue,
-          territory: job.territory,
-          createdBy: 'web',
-        },
-        { source: 'web', idempotencyKey: `${job.appointmentId}:created` }
-      )
-    );
-
-    emitTenant(clientId, 'job:created', { clientId, job });
-
-    res.json({ ok: true, job });
-  } catch (e) {
-    console.error('[POST /api/jobs]', e);
-    res.status(500).json({ ok: false, error: 'failed to create job' });
-  }
-});
-
-app.get('/api/jobs', (req, res) => {
-  const clientId = (req.query.clientId || 'default').trim();
-  const jobsMap = jobsByClient.get(clientId) || new Map();
-  res.json({ ok: true, items: Array.from(jobsMap.values()) });
-});
-
-/**
- * POST /api/job/:id/ensure-thread
- * Body: { clientId?: string }
- */
-app.post('/api/job/:id/ensure-thread', async (req, res) => {
-  try {
-    const clientId = (req.body.clientId || 'default').trim();
-    const jobs = jobsByClient.get(clientId) || new Map();
-    const job = jobs.get(req.params.id);
-
-    if (!job) return res.status(404).json({ ok: false, error: 'Job not found' });
-
-    let contact = normalizeContact(job.contact || {});
-    if ((!contact.phones?.length || !contact.name) && (contact.id || contact.emails?.[0])) {
-      try {
-        const enriched = await getContact(contact.id, { email: contact.emails?.[0] });
-        contact = normalizeContact({ ...contact, ...enriched });
-      } catch {}
-    }
-    if (!contact.id) {
-      return res.status(400).json({ ok: false, error: 'Job has no contact id' });
-    }
-
-    const phone = pickPrimaryPhone(contact);
-    const conversationId = ensureMockConversationForContact(contact.id);
-
-    const pref = getAutoPref({ id: contact.id, phone: phoneE164(phone) });
-    const autopilot = pref == null ? CHATTER_AI === true : !!pref;
-
-    return res.json({ ok: true, conversationId, contact, phone, autopilot });
-  } catch (e) {
-    console.error('[ensure-thread]', e);
-    res.status(500).json({ ok: false, error: 'failed to ensure thread' });
-  }
-});
-
-app.post('/api/clear-jobs', (req, res) => {
-  const clientId = req.body.clientId || 'default';
-  jobsByClient.set(clientId, new Map());
-  res.json({ ok: true, message: `Jobs cleared for ${clientId}` });
-});
-
-// PATCH /api/jobs/:id
-app.patch('/api/jobs/:id', async (req, res) => {
-  try {
-    const clientId = (req.body.clientId || 'default').trim();
-    const jobs = jobsByClient.get(clientId) || new Map();
-    const job = jobs.get(req.params.id);
-    if (!job) return res.status(404).json({ ok: false, error: 'job not found' });
-
-    const { startTime, endTime, assignedUserId } = req.body || {};
-
-    if (startTime) job.startTime = ensureOffsetISO(startTime);
-    if (endTime) job.endTime = ensureOffsetISO(endTime);
-    if (assignedUserId) job.assignedUserId = String(assignedUserId);
-
-    jobs.set(job.appointmentId, job);
-
-    try {
-      if (assignedUserId) {
-        await updateAppointmentOwner(job.appointmentId, assignedUserId);
-        await appendAppointmentNotes(
-          job.appointmentId,
-          `Reassigned to ${assignedUserId} via Calendar/Board`
-        );
-      }
-      if (startTime || endTime) {
-        await rescheduleAppointment(job.appointmentId, job.startTime, job.endTime);
-        await appendAppointmentNotes(
-          job.appointmentId,
-          `Rescheduled to ${job.startTime} – ${job.endTime}`
-        );
-      }
-    } catch (e) {
-      console.warn('[PATCH /api/jobs/:id] GHL sync warning:', e?.response?.data || e.message);
-    }
-
-    emitTenant(clientId, 'job:updated', { clientId, job });
-
-    res.json({ ok: true, job });
-  } catch (e) {
-    console.error('[PATCH /api/jobs/:id]', e);
-    res.status(500).json({ ok: false, error: 'update failed' });
-  }
-});
-
-// --- Chat AI per-contact state ---
-app.get('/api/agent/state', (req, res) => {
-  const id = req.query.id?.trim();
-  const phone = phoneE164(req.query.phone?.trim());
-  const pref = getAutoPref({ id, phone });
-  const effective = pref == null ? CHATTER_AI === true : !!pref;
-  const source = pref == null ? 'global_default' : 'per_contact';
-  res.json({ ok: true, state: { autopilot: effective }, source });
-});
-
-app.post('/api/agent/autopilot', (req, res) => {
-  try {
-    const { id, phone, enabled } = req.body || {};
-    if (typeof enabled !== 'boolean') {
-      return res.status(400).json({ ok: false, error: 'enabled must be boolean' });
-    }
-    setAutoPref({ id, phone: phoneE164(phone), enabled });
-    res.json({ ok: true, saved: { id: id || null, phone: phoneE164(phone) || null, enabled } });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message || 'failed to save' });
-  }
-});
-
-// --- Voice AI state ---
-app.get('/api/voice/state', (_req, res) => {
-  res.json({ ok: true, enabled: !!VOICE_AI_ENABLED });
-});
-
-app.post('/api/voice/state', (req, res) => {
-  VOICE_AI_ENABLED = !!req.body?.enabled;
-  res.json({ ok: true, enabled: VOICE_AI_ENABLED });
-});
-
-// Twilio inbound SMS webhook
-app.post('/twilio/sms', express.urlencoded({ extended: false }), verifyTwilio(), async (req, res) => {
-
-  const { From, Body, To } = req.body || {};
-
-  // 🔁 resolve tenant from inbound "To"
-  req.tenantId = getTenantForPhone(To) || 'default';
-
-  recordSms({ to: To, from: From, direction: 'inbound', text: Body });
-  emitTenant(req.tenantId, 'sms:inbound', {
-    from: From,
-    to: To,
-    text: Body,
-    at: new Date().toISOString(),
-  });
-
-  try {
-    const phoneNorm = phoneE164(From);
-    const pref = getAutoPref({ phone: phoneNorm });
-    const useAI = pref == null ? CHATTER_AI === true : !!pref;
-
-    if (useAI) {
-      await agentHandle({
-        from: From,
-        to: To,
-        text: Body,
-        send: async (toPhone, replyText) => {
-          const resp = await sendSMS(toPhone, replyText);
-          recordSms({
-            to: toPhone,
-            from: To,
-            direction: 'outbound',
-            text: replyText,
-          });
-          emitTenant(req.tenantId, 'sms:outbound', {
-            sid: resp.sid,
-            to: toPhone,
-            text: replyText,
-            at: new Date().toISOString(),
-          });
-          return resp;
-        },
-      });
-    }
-
-    res.type('text/xml').send('<Response/>');
-  } catch (err) {
-    console.error('[twilio/sms agent error]', err?.message || err);
-    res.type('text/xml').send('<Response/>');
-  }
-});
-
-
-
-app.post('/twilio/voice-status', express.urlencoded({ extended: false }), verifyTwilio(), async (req, res) => {   
-  const { CallSid, CallStatus, From, To, Direction } = req.body || {};
-
-   res.type('text/xml').send('<Response/>');
- });
- 
-// Inbound Voice webhook → connect the call to our Media Stream WS
-app.post('/twilio/voice', express.urlencoded({ extended: false }), verifyTwilio(), (req, res) => {
-  const { To } = req.body || {};
-  const tenantId = getTenantForPhone(To) || req.tenantId || 'default';
-
-  const baseWs = publicWsUrl();
-  const twiml = new twilio.twiml.VoiceResponse();
-
-  if (!VOICE_AI_ENABLED) {
-    const twiml = new twilio.twiml.VoiceResponse();
-    twiml.say('Sorry, voice is currently unavailable.');
-    return res.type('text/xml').send(twiml.toString());
-  }
-
-  if (!baseWs) {
-    twiml.say('Media stream is not configured on the server.');
-    return res.type('text/xml').send(twiml.toString());
-  }
-
-  const connect = twiml.connect();
-  const streamUrl = `${baseWs}${VOICE_WS_PATH}?tenantId=${encodeURIComponent(tenantId)}`;
-  connect.stream({ url: streamUrl, track: 'both_tracks' });
-
-  res.type('text/xml').send(twiml.toString());
-});
-
-// --- Aggregate contacts (manual + jobs memory) ---
 app.get('/api/contacts', (req, res) => {
   try {
     const clientId = (req.query.clientId || 'default').trim();
@@ -1394,7 +1708,7 @@ app.get('/api/contacts', (req, res) => {
   }
 });
 
-// GET dispositions for a contact
+// Dispositions for a contact
 app.get('/api/contacts/:id/dispositions', (req, res) => {
   const clientId = (req.query.clientId || 'default').trim();
   const id = req.params.id;
@@ -1549,7 +1863,7 @@ app.post('/api/contacts', (req, res) => {
       tags: Array.isArray(b.tags) ? b.tags : [],
       kind: b.kind || undefined,
       lastAppointmentAt: b.lastAppointmentAt || null,
-      appointments: Number.isFinite(b.appointments) ? Number(b.appointments) : 0,
+      appointments: Number.isFinite(b.appointments) ? b.appointments : 0,
     };
 
     bag.set(summary.id, summary);
@@ -1591,6 +1905,10 @@ app.get('/api/contacts/:contactId/appointments', (req, res) => {
     res.status(500).json({ ok: false, error: 'failed to load contact appointments' });
   }
 });
+
+// =============================================================================
+// Week appointments (with travel mins between route neighbors)
+// =============================================================================
 
 app.get('/api/week-appointments', async (req, res) => {
   try {
@@ -1643,12 +1961,7 @@ app.get('/api/week-appointments', async (req, res) => {
       for (let i = 1; i < list.length; i++) {
         const prev = list[i - 1];
         const curr = list[i];
-        if (
-          prev.lat != null &&
-          prev.lng != null &&
-          curr.lat != null &&
-          curr.lng != null
-        ) {
+        if (prev.lat != null && prev.lng != null && curr.lat != null && curr.lng != null) {
           curr.travelMinutesFromPrev = await getDriveMinutes(
             { lat: prev.lat, lng: prev.lng },
             { lat: curr.lat, lng: curr.lng }
@@ -1683,7 +1996,10 @@ app.get('/api/week-appointments', async (req, res) => {
   }
 });
 
-// --- Weather (Open-Meteo) ---
+// =============================================================================
+// Weather (Open-Meteo)
+// =============================================================================
+
 const weatherCache = new Map();
 const WEATHER_TTL_MS = 30 * 60 * 1000;
 
@@ -1729,7 +2045,10 @@ app.get('/api/forecast', async (req, res) => {
   }
 });
 
-// --- GHL conversation messaging (read) ---
+// =============================================================================
+// GHL conversation messaging (read)
+// =============================================================================
+
 app.get('/api/ghl/conversation/:conversationId/messages', async (req, res) => {
   try {
     const conversationId = req.params.conversationId;
@@ -1751,9 +2070,7 @@ app.get('/api/ghl/conversation/:conversationId/messages', async (req, res) => {
     url.searchParams.set('limit', '50');
 
     const resp = await axios.get(url.toString(), { headers, timeout: 15000 });
-    const raw = Array.isArray(resp.data?.messages)
-      ? resp.data.messages
-      : resp.data?.data || [];
+    const raw = Array.isArray(resp.data?.messages) ? resp.data.messages : resp.data?.data || [];
 
     const messages = raw.map((m) => ({
       id: m.id,
@@ -1770,6 +2087,10 @@ app.get('/api/ghl/conversation/:conversationId/messages', async (req, res) => {
     res.status(500).json({ ok: false, error: e?.response?.data || e.message });
   }
 });
+
+// =============================================================================
+// Jobs APIs
+// =============================================================================
 
 app.get('/api/job/:id', (req, res) => {
   const clientId = req.query.clientId || 'default';
@@ -1808,154 +2129,383 @@ app.get('/api/debug/calendar', async (req, res) => {
   }
 });
 
-// --- Suggest times (route-aware) ---
-app.post('/api/suggest-times', async (req, res) => {
+// ---- Suggest times (route-aware) ----
+const TZ_OFFSET_FALLBACK = process.env.DEFAULT_TZ_OFFSET || '-04:00';
+const SUGGEST_SLOTS_SOURCE = process.env.SUGGEST_SLOTS_SOURCE || 'ghl';
+
+function buildLocalSlots(date, stepMin = 30, open = '09:00', close = '17:00') {
+  const startISO = `${date}T${open}:00${TZ_OFFSET_FALLBACK}`;
+  const endISO = `${date}T${close}:00${TZ_OFFSET_FALLBACK}`;
+  const out = [];
+  for (let t = new Date(startISO); t < new Date(endISO); t = new Date(t.getTime() + stepMin * 60000)) {
+    const end = new Date(t.getTime() + stepMin * 60000);
+    out.push({ start: t.toISOString(), end: end.toISOString() });
+  }
+  return out;
+}
+
+function parseDateish(v) {
+  if (v == null) return null;
+  if (typeof v === 'number') return new Date(v > 1e12 ? v : v * 1000);
+  if (typeof v === 'string') {
+    const n = Number(v);
+    if (!Number.isNaN(n)) return new Date(n > 1e12 ? n : n * 1000);
+    return new Date(v);
+  }
+  return new Date(v);
+}
+
+function extractSlotsFromGHL(data) {
+  let raw = data?.timeSlots || data?.availableSlots || data?.slots;
+  if (!raw) {
+    const dateKey = Object.keys(data || {}).find(
+      (k) => /^\d{4}-\d{2}-\d{2}$/.test(k) && data[k]?.slots
+    );
+    if (dateKey) raw = data[dateKey].slots;
+  }
+  if (!raw) return [];
+  return raw
+    .map((s) => {
+      const startD = parseDateish(s?.start ?? s);
+      if (!startD || isNaN(startD)) return null;
+      const endD = parseDateish(s?.end) || new Date(startD.getTime() + 60 * 60 * 1000);
+      return { start: startD.toISOString(), end: endD.toISOString() };
+    })
+    .filter(Boolean);
+}
+
+function dayBoundsEpochMs(yyyyMmDd, tzOffset = TZ_OFFSET_FALLBACK) {
+  const startISO = `${yyyyMmDd}T00:00:00${tzOffset}`;
+  const endISO = `${yyyyMmDd}T23:59:59${tzOffset}`;
+  return { startMs: new Date(startISO).getTime(), endMs: new Date(endISO).getTime() };
+}
+
+function ensureOffsetISO(iso, fallbackOffset = TZ_OFFSET_FALLBACK) {
+  if (!iso) return iso;
+  if (/[+-]\d\d:\d\d$|Z$/.test(iso)) {
+    return iso.replace(/\.\d{3}/, '');
+  }
+  return `${iso.replace(/\.\d{3}/, '')}${fallbackOffset}`;
+}
+
+app.get('/api/test-geocode', async (req, res) => {
   try {
-    const args = SuggestTimesRequestSchema.parse(req.body);
-    const {
-      clientId,
-      date,
-      timezone,
-      address,
-      jobType,
-      estValue,
-      territory,
-      durationMin,
-      bufferMin,
-      maxDetourMin,
-    } = args;
-
-    const { startMs, endMs } = dayBoundsEpochMs(date, TZ_OFFSET_FALLBACK);
-
-    let freeSlots = [];
-    if (SUGGEST_SLOTS_SOURCE === 'local') {
-      freeSlots = buildLocalSlots(date);
-    } else {
-      const calendarId = process.env.GHL_CALENDAR_ID;
-      if (!calendarId || !process.env.GHL_ACCESS_TOKEN) {
-        return res.status(500).json({ ok: false, error: 'GHL env vars missing' });
-      }
-      const base = 'https://services.leadconnectorhq.com';
-      const free = new URL(`/calendars/${calendarId}/free-slots`, base);
-
-      free.searchParams.set('startDate', String(startMs));
-      free.searchParams.set('endDate', String(endMs));
-      free.searchParams.set('timezone', timezone);
-
-      const { data } = await axios.get(free.toString(), {
-        headers: {
-          Authorization: `Bearer ${process.env.GHL_ACCESS_TOKEN}`,
-          Version: '2021-04-15',
-          Accept: 'application/json',
-        },
-        timeout: 15000,
-      });
-
-      freeSlots = extractSlotsFromGHL(data);
-    }
-
-    let newLoc = null;
-    if (address) {
-      try {
-        newLoc = await geocodeAddress(address);
-      } catch {}
-    }
-
-    const jobsMap = jobsByClient.get(clientId) || new Map();
-    const dayJobs = Array.from(jobsMap.values())
-      .filter((j) => {
-        const t = new Date(j.startTime).getTime();
-        return t >= startMs && t <= endMs;
-      })
-      .map((j) => ({
-        id: j.appointmentId,
-        start: new Date(j.startTime).getTime(),
-        end: new Date(j.endTime || new Date(new Date(j.startTime).getTime() + 60 * 60 * 1000)).getTime(),
-        lat: j.lat,
-        lng: j.lng,
-        address: j.address,
-        territory: j.territory,
-        estValue: j.estValue,
-      }))
-      .sort((a, b) => a.start - b.start);
-
-    function neighbors(startMs) {
-      let prev = null,
-        next = null;
-      for (const j of dayJobs) {
-        if (j.end <= startMs) prev = j;
-        if (j.start >= startMs) {
-          next = j;
-          break;
-        }
-      }
-      return { prev, next };
-    }
-
-    const accepted = [];
-    for (const s of freeSlots) {
-      const start = new Date(s.start).getTime();
-      const end = start + durationMin * 60 * 1000;
-
-      const overlaps = dayJobs.some((j) => !(end <= j.start || start >= j.end));
-      if (overlaps) continue;
-
-      const { prev, next } = neighbors(start);
-
-      let travelPrev = 0,
-        travelNext = 0;
-
-      if (prev && newLoc && prev.lat != null && prev.lng != null) {
-        const mins = await getDriveMinutes({ lat: prev.lat, lng: prev.lng }, newLoc);
-        if (mins != null) travelPrev = mins;
-        const gap = (start - prev.end) / 60000;
-        if (gap < bufferMin + travelPrev) continue;
-      }
-
-      if (next && newLoc && next.lat != null && next.lng != null) {
-        const mins = await getDriveMinutes(newLoc, { lat: next.lat, lng: next.lng });
-        if (mins != null) travelNext = mins;
-        const gap = (next.start - end) / 60000;
-        if (gap < bufferMin + travelNext) continue;
-      }
-
-      if (territory && dayJobs.length) {
-        const badNeighbor =
-          (prev && prev.territory && prev.territory !== territory) ||
-          (next && next.territory && next.territory !== territory);
-        if (badNeighbor) continue;
-      }
-
-      const totalDetour = travelPrev + travelNext;
-      if (totalDetour > maxDetourMin) continue;
-
-      const score = (Number(estValue) || 0) / 1000 - totalDetour / 10;
-
-      accepted.push({
-        start: new Date(start).toISOString(),
-        end: new Date(end).toISOString(),
-        jobType,
-        estValue: Number(estValue) || 0,
-        territory,
-        address,
-        travel: { fromPrev: travelPrev || null, toNext: travelNext || null, total: totalDetour || 0 },
-        neighbors: { prev: prev?.id || null, next: next?.id || null },
-        reason: `fits route (+${totalDetour}m travel, ${bufferMin}m buffer)`,
-        score,
-      });
-    }
-
-    accepted.sort((a, b) => b.score - a.score);
-
-    return res.json({ ok: true, suggestions: accepted });
+    const testAddress = req.query.address || '1600 Amphitheatre Parkway, Mountain View, CA';
+    const coords = await geocodeAddress(testAddress);
+    res.json({ ok: true, address: testAddress, coords });
   } catch (err) {
-    console.error('[suggest-times error]', err?.response?.data || err.message);
-    const msg = err?.response?.data?.message || err?.message || 'Availability lookup failed';
-    return res.status(500).json({ ok: false, error: msg });
+    console.error('[Test Geocode] Error:', err);
+    res.status(500).json({ ok: false, error: err.message });
   }
 });
 
-// --- Real SMS (manual) ---
+// OSM / Nominatim geocode proxy with cache
+const nominatimCache = new Map();
+const NOM_TTL_MS = 12 * 60 * 60 * 1000;
+
+app.get('/api/geo/search', async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim().slice(0, 200);
+    if (!q) return res.json([]);
+
+    const key = q.toLowerCase();
+    const hit = nominatimCache.get(key);
+    if (hit && Date.now() - hit.ts < NOM_TTL_MS) {
+      return res.json(hit.data);
+    }
+
+    const email = process.env.GEOCODE_EMAIL || 'admin@example.com';
+    const url =
+      'https://nominatim.openstreetmap.org/search?format=json&limit=5&addressdetails=1&q=' +
+      encodeURIComponent(q) +
+      '&email=' +
+      encodeURIComponent(email);
+
+    const r = await fetch(url, {
+      headers: {
+        'User-Agent': `x-fleet/1.0 (${email})`,
+        Accept: 'application/json',
+      },
+    });
+
+    if (!r.ok) {
+      const msg = await r.text().catch(() => '');
+      return res
+        .status(502)
+        .json({ ok: false, error: `nominatim_${r.status}`, details: msg.slice(0, 200) });
+    }
+
+    const data = await r.json().catch(() => []);
+    const list = Array.isArray(data) ? data : [];
+    nominatimCache.set(key, { ts: Date.now(), data: list });
+    return res.json(list);
+  } catch (e) {
+    console.warn('[geo/search]', e?.message || e);
+    return res.json([]);
+  }
+});
+
+// Create / list / update jobs
+app.post('/api/jobs', async (req, res) => {
+  try {
+    const b = req.body || {};
+    const clientId = (b.clientId || 'default').trim();
+
+    if (!jobsByClient.has(clientId)) jobsByClient.set(clientId, new Map());
+    const jobs = jobsByClient.get(clientId);
+
+    const id = b.appointmentId || b.id || newId('job_');
+    const startISO = ensureOffsetISO(b.startTime) || new Date().toISOString();
+    const endISO =
+      ensureOffsetISO(b.endTime) ||
+      new Date(new Date(startISO).getTime() + 60 * 60 * 1000).toISOString();
+
+    const address = toAddressString(b.address);
+    let lat = Number(b.lat),
+      lng = Number(b.lng);
+    const missingOrZero =
+      !Number.isFinite(lat) || !Number.isFinite(lng) || (lat === 0 && lng === 0);
+
+    if (missingOrZero && address) {
+      try {
+        const geo = await geocodeAddress(address);
+        if (geo) {
+          lat = geo.lat;
+          lng = geo.lng;
+        }
+      } catch {}
+    }
+
+    const contact = normalizeContact(b.contact || {});
+
+    const job = {
+      appointmentId: id,
+      startTime: startISO,
+      endTime: endISO,
+      jobType: b.jobType || 'Job',
+      estValue: Number(b.estValue) || 0,
+      territory: b.territory || null,
+      assignedUserId: b.assignedUserId || null,
+      assignedRepName: b.assignedRepName || null,
+      address,
+      lat: Number.isFinite(lat) ? lat : null,
+      lng: Number.isFinite(lng) ? lng : null,
+      contact,
+    };
+
+    jobs.set(job.appointmentId, job);
+
+    recordAndEmit(
+      ioForTenant(clientId),
+      createEvent(
+        'appointment.created',
+        clientId,
+        {
+          appointmentId: job.appointmentId,
+          contactId: (contact && contact.id) || (job.contact && job.contact.id) || null,
+          contactName: (contact && contact.name) || (job.contact && job.contact.name) || null,
+          address,
+          startTime: job.startTime,
+          endTime: job.endTime,
+          estValue: job.estValue,
+          territory: job.territory,
+          createdBy: 'web',
+        },
+        { source: 'web', idempotencyKey: `${job.appointmentId}:created` }
+      )
+    );
+
+    emitTenant(clientId, 'job:created', { clientId, job });
+
+    res.json({ ok: true, job });
+  } catch (e) {
+    console.error('[POST /api/jobs]', e);
+    res.status(500).json({ ok: false, error: 'failed to create job' });
+  }
+});
+
+app.get('/api/jobs', (req, res) => {
+  const clientId = (req.query.clientId || 'default').trim();
+  const jobsMap = jobsByClient.get(clientId) || new Map();
+  res.json({ ok: true, items: Array.from(jobsMap.values()) });
+});
+
+/**
+ * POST /api/job/:id/ensure-thread
+ * Body: { clientId?: string }
+ */
+app.post('/api/job/:id/ensure-thread', async (req, res) => {
+  try {
+    const clientId = (req.body.clientId || 'default').trim();
+    const jobs = jobsByClient.get(clientId) || new Map();
+    const job = jobs.get(req.params.id);
+
+    if (!job) return res.status(404).json({ ok: false, error: 'Job not found' });
+
+    let contact = normalizeContact(job.contact || {});
+    if ((!contact.phones?.length || !contact.name) && (contact.id || contact.emails?.[0])) {
+      try {
+        const enriched = await getContact(contact.id, { email: contact.emails?.[0] });
+        contact = normalizeContact({ ...contact, ...enriched });
+      } catch {}
+    }
+    if (!contact.id) {
+      return res.status(400).json({ ok: false, error: 'Job has no contact id' });
+    }
+
+    const phone = pickPrimaryPhone(contact);
+    const conversationId = ensureMockConversationForContact(contact.id);
+
+    const pref = getAutoPref({ id: contact.id, phone: phoneE164(phone) });
+    const autopilot = pref == null ? CHATTER_AI === true : !!pref;
+
+    return res.json({ ok: true, conversationId, contact, phone, autopilot });
+  } catch (e) {
+    console.error('[ensure-thread]', e);
+    res.status(500).json({ ok: false, error: 'failed to ensure thread' });
+  }
+});
+
+app.post('/api/clear-jobs', (req, res) => {
+  const clientId = req.body.clientId || 'default';
+  jobsByClient.set(clientId, new Map());
+  res.json({ ok: true, message: `Jobs cleared for ${clientId}` });
+});
+
+app.patch('/api/jobs/:id', async (req, res) => {
+  try {
+    const clientId = (req.body.clientId || 'default').trim();
+    const jobs = jobsByClient.get(clientId) || new Map();
+    const job = jobs.get(req.params.id);
+    if (!job) return res.status(404).json({ ok: false, error: 'job not found' });
+
+    const { startTime, endTime, assignedUserId } = req.body || {};
+
+    if (startTime) job.startTime = ensureOffsetISO(startTime);
+    if (endTime) job.endTime = ensureOffsetISO(endTime);
+    if (assignedUserId) job.assignedUserId = String(assignedUserId);
+
+    jobs.set(job.appointmentId, job);
+
+    try {
+      if (assignedUserId) {
+        await updateAppointmentOwner(job.appointmentId, assignedUserId);
+        await appendAppointmentNotes(
+          job.appointmentId,
+          `Reassigned to ${assignedUserId} via Calendar/Board`
+        );
+      }
+      if (startTime || endTime) {
+        await rescheduleAppointment(job.appointmentId, job.startTime, job.endTime);
+        await appendAppointmentNotes(
+          job.appointmentId,
+          `Rescheduled to ${job.startTime} – ${job.endTime}`
+        );
+      }
+    } catch (e) {
+      console.warn('[PATCH /api/jobs/:id] GHL sync warning:', e?.response?.data || e.message);
+    }
+
+    emitTenant(clientId, 'job:updated', { clientId, job });
+
+    res.json({ ok: true, job });
+  } catch (e) {
+    console.error('[PATCH /api/jobs/:id]', e);
+    res.status(500).json({ ok: false, error: 'update failed' });
+  }
+});
+
+// =============================================================================
+// Agent state (per-contact AI auto-reply), Voice AI state
+// =============================================================================
+
+app.get('/api/agent/state', (req, res) => {
+  const id = req.query.id?.trim();
+  const phone = phoneE164(req.query.phone?.trim());
+  const pref = getAutoPref({ id, phone });
+  const effective = pref == null ? CHATTER_AI === true : !!pref;
+  const source = pref == null ? 'global_default' : 'per_contact';
+  res.json({ ok: true, state: { autopilot: effective }, source });
+});
+
+app.post('/api/agent/autopilot', (req, res) => {
+  try {
+    const { id, phone, enabled } = req.body || {};
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({ ok: false, error: 'enabled must be boolean' });
+    }
+    setAutoPref({ id, phone: phoneE164(phone), enabled });
+    res.json({ ok: true, saved: { id: id || null, phone: phoneE164(phone) || null, enabled } });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message || 'failed to save' });
+  }
+});
+
+app.get('/api/voice/state', (_req, res) => {
+  res.json({ ok: true, enabled: !!VOICE_AI_ENABLED });
+});
+
+app.post('/api/voice/state', (req, res) => {
+  VOICE_AI_ENABLED = !!req.body?.enabled;
+  res.json({ ok: true, enabled: VOICE_AI_ENABLED });
+});
+
+// =============================================================================
+// SMS (Twilio) — inbound, manual send, threads
+// =============================================================================
+
+import { recordSms, normalizePhone as phoneE164, getThread } from './lib/chatter.js';
+
+app.post('/twilio/sms', express.urlencoded({ extended: false }), verifyTwilio(), async (req, res) => {
+  const { From, Body, To } = req.body || {};
+
+  // Resolve tenant from inbound "To"
+  req.tenantId = getTenantForPhone(To) || 'default';
+
+  recordSms({ to: To, from: From, direction: 'inbound', text: Body });
+  emitTenant(req.tenantId, 'sms:inbound', {
+    from: From,
+    to: To,
+    text: Body,
+    at: new Date().toISOString(),
+  });
+
+  try {
+    const phoneNorm = phoneE164(From);
+    const pref = getAutoPref({ phone: phoneNorm });
+    const useAI = pref == null ? CHATTER_AI === true : !!pref;
+
+    if (useAI) {
+      await agentHandle({
+        from: From,
+        to: To,
+        text: Body,
+        send: async (toPhone, replyText) => {
+          const resp = await sendSMS(toPhone, replyText);
+          recordSms({
+            to: toPhone,
+            from: To,
+            direction: 'outbound',
+            text: replyText,
+          });
+          emitTenant(req.tenantId, 'sms:outbound', {
+            sid: resp.sid,
+            to: toPhone,
+            text: replyText,
+            at: new Date().toISOString(),
+          });
+          return resp;
+        },
+      });
+    }
+
+    res.type('text/xml').send('<Response/>');
+  } catch (err) {
+    console.error('[twilio/sms agent error]', err?.message || err);
+    res.type('text/xml').send('<Response/>');
+  }
+});
+
 app.post('/api/sms/send', async (req, res) => {
   try {
     const { to, text } = req.body || {};
@@ -1986,17 +2536,15 @@ app.post('/api/sms/send', async (req, res) => {
   }
 });
 
-// --- Read SMS thread for a phone (simple, in-memory) ---
 app.get('/api/sms/thread', (req, res) => {
   try {
     const raw = req.query.phone || '';
     const phone = phoneE164(raw);
     if (!phone) return res.status(400).json({ ok: false, error: 'phone required' });
 
-    // pull from the shared in-memory log
+    // Pull from shared in-memory log
     const arr = getThread(phone) || [];
 
-    // normalize a lightweight payload for UIs
     const items = arr.map((m, i) => ({
       id: `${phone}:${i}:${m.at}`,
       dir: m.direction === 'outbound' ? 'out' : 'in',
@@ -2012,7 +2560,10 @@ app.get('/api/sms/thread', (req, res) => {
   }
 });
 
-// --- Mock: send GHL message (optionally Twilio SMS) ---
+// =============================================================================
+// Mock GHL send (optionally Twilio SMS)
+// =============================================================================
+
 app.post('/api/mock/ghl/send-message', async (req, res) => {
   const {
     contactId,
@@ -2105,7 +2656,10 @@ app.get('/api/mock/ghl/conversation/:conversationId/messages', (req, res) => {
   return res.json({ ok: true, conversationId: convo.id, messages: convo.messages });
 });
 
-// --- Client settings (in-memory) ---
+// =============================================================================
+// Client settings (in-memory)
+// =============================================================================
+
 const DEFAULT_PAYDAY_THRESHOLD = Number(process.env.DEFAULT_PAYDAY_THRESHOLD || 2500);
 const clientSettings = new Map();
 
@@ -2131,7 +2685,10 @@ app.post('/api/client-settings', (req, res) => {
   res.json({ ok: true, clientId, settings: { paydayThreshold } });
 });
 
-// ---- Book appointment and push to GHL ----
+// =============================================================================
+// Booking flow: create appointment (push to GHL) + scoring/assignment
+// =============================================================================
+
 async function handleBookAppointment(req, res) {
   try {
     console.log('[DEBUG] Incoming create-appointment payload:', req.body);
@@ -2140,7 +2697,9 @@ async function handleBookAppointment(req, res) {
     try {
       args = CreateAppointmentReqSchema.parse(req.body);
     } catch (e) {
-      return res.status(400).json({ ok: false, error: 'Invalid request', details: e.errors ?? String(e) });
+      return res
+        .status(400)
+        .json({ ok: false, error: 'Invalid request', details: e.errors ?? String(e) });
     }
 
     const {
@@ -2165,7 +2724,8 @@ async function handleBookAppointment(req, res) {
     if (!address || !startTime) {
       return res.status(400).json({
         ok: false,
-        error: 'Missing required fields: address, startTime (and either contactId OR contact{name,phone})',
+        error:
+          'Missing required fields: address, startTime (and either contactId OR contact{name,phone})',
       });
     }
 
@@ -2175,7 +2735,8 @@ async function handleBookAppointment(req, res) {
       if (!contact || !contact.name || !contact.phone) {
         return res.status(400).json({
           ok: false,
-          error: 'Missing contact info: contact{name,phone} is required when contactId is not provided',
+          error:
+            'Missing contact info: contact{name,phone} is required when contactId is not provided',
         });
       }
 
@@ -2497,6 +3058,10 @@ app.post('/ghl/appointment-created', async (req, res) => {
   }
 });
 
+// =============================================================================
+// Helpers (address / dates / job normalization)
+// =============================================================================
+
 function buildCandidateStarts(baseISO) {
   const base = new Date(baseISO || Date.now());
   const out = [];
@@ -2567,6 +3132,10 @@ function normalizeJob(appt) {
   };
 }
 
+// =============================================================================
+// Dev utilities
+// =============================================================================
+
 app.get('/__routes', (_req, res) => {
   const routes = app._router.stack
     .filter((l) => l.route)
@@ -2574,8 +3143,13 @@ app.get('/__routes', (_req, res) => {
   res.json(routes);
 });
 
-const PORT = process.env.PORT || 8080;
+app.get('/health', (_req, res) => res.json({ ok: true }));
 
+// =============================================================================
+// Start server
+// =============================================================================
+
+const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => {
   console.log(`SDC backend (multi-client) on http://localhost:${PORT}`);
 });

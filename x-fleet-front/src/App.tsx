@@ -26,6 +26,8 @@ import AIHub from './pages/AIHub'
 import JobBoard from './pages/JobBoard'
 import LeadHub from './pages/LeadHub'
 import PricingPage from './pages/PricingPage'
+import SalesTracker from "./pages/SalesTracker"
+import "../src/lib/http";
 
 // import without extension so it resolves FloatingCTA.tsx
 import FloatingCTA from './components/FloatingCTA'
@@ -84,6 +86,7 @@ export default function App() {
 
           {/* Other */}
           <Route path="vehicles" element={<VehiclesPage />} />
+          <Route path="/sales" element={<SalesTracker />} />
           <Route path="leads" element={<LeadHub />} />
           <Route path="calendar" element={<Calendar />} />
           <Route path="ai" element={<AIHub />} />
