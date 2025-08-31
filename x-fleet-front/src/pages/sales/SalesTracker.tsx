@@ -3,12 +3,12 @@
 import * as React from 'react'
 
 // Sales feature components you already have
-import UnassignedPaymentsTable from "../components/sales/UnassignedPaymentsTable";
-import CommissionByRep from "../components/sales/CommissionByRep";
-import OutstandingByCustomer from "../components/sales/OutstandingByCustomer";
-import CustomersBreakdown from "../components/sales/CustomersBreakdown";
-import MonthlyReports from "../components/sales/MonthlyReports";
-import { api, resolveTenantId } from "../lib/http";
+import UnassignedPaymentsTable from "../../components/sales/UnassignedPaymentsTable";
+import CommissionByRep from "../../components/sales/CommissionByRep";
+import OutstandingByCustomer from "../../components/sales/OutstandingByCustomer";
+import CustomersBreakdown from "../../components/sales/CustomersBreakdown";
+import MonthlyReports from "../../components/sales/MonthlyReports";
+import { api, resolveTenantId } from "../../lib/http";
 
 // ------------------------------------------------------------
 // Dark theme using ONLY React + Tailwind (no external UI deps)

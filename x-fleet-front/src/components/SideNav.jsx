@@ -40,7 +40,7 @@ function LinkRow({ to, end, label, Icon }) {
 
 function SectionLabel({ children }) {
   return (
-    <div className="px-3 pt-3 pb-1 text[11px] uppercase tracking-[0.12em] text-white/50">
+    <div className="px-3 pt-3 pb-1 text-[11px] uppercase tracking-[0.12em] text-white/50">
       {children}
     </div>
   )
@@ -53,36 +53,36 @@ const SECTIONS = [
   },
   {
     label: 'Office',
-    links: [ 
+    links: [
       { to: '/chatter',  label: 'Messages',   icon: MessageSquare },
       { to: '/phones',   label: 'Phones',     icon: Phone },
       { to: '/team',     label: 'Team Chat',  icon: MessageSquare },
     ],
   },
   {
-      label: 'LEADS',
+    label: 'Leads',
     links: [
       { to: '/contacts', label: 'Contacts',   icon: Users },
-      { to: '/leads',    label: 'Lead Hub',  icon: Activity },  
+      { to: '/leads',    label: 'Lead Hub',   icon: Activity },
     ],
   },
   {
     label: 'Jobs',
     links: [
-      { to: '/jobs',     label: 'Bookings',  icon: LayoutGrid },
-      { to: '/calendar', label: 'Calendar',  icon: Calendar },
-      { to: '/vehicles', label: 'Fleet',     icon: Truck },
-      { to: '/jobboard', label: 'Production', icon: Wrench }, // ✅ matches route
+      { to: '/jobs',     label: 'Bookings',   icon: LayoutGrid },
+      { to: '/calendar', label: 'Calendar',   icon: Calendar },
+      { to: '/vehicles', label: 'Fleet',      icon: Truck },
+      { to: '/jobboard', label: 'Production', icon: Wrench },
     ],
   },
   {
-    label: 'Accounting',
-    links: [
-      { to: '/estimator', label: 'Estimates', icon: FileText },
-      { to: '/invoices',  label: 'Invoices',  icon: BadgeDollarSign },
-      { to: '/sales',  label: 'SalesTracker',  icon: BadgeDollarSign },
-    ],
-  },
+  label: 'Accounting',
+  links: [
+    { to: '/estimator', label: 'Estimates', icon: FileText },
+    { to: '/invoices',  label: 'Invoices',  icon: BadgeDollarSign },
+    { to: '/sales',     label: 'Sales',     icon: Activity }, // single entry
+  ],
+},
   {
     label: 'Automation',
     links: [

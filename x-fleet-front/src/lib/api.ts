@@ -1,27 +1,29 @@
 // src/lib/api.ts
-const BASE =
+import axios from 'axios';
+
+export const API_BASE =
   (import.meta as any)?.env?.VITE_API_BASE ||
   (typeof window !== 'undefined' ? window.location.origin : '');
 
-const TENANT_ID =
-  (import.meta as any)?.env?.VITE_TENANT_ID || 'default';
+export const TENANT_ID =
+  (import.meta as any)?.env?.VITE_TENANT_ID || 'localhost';
 
-export async function api(path: string, init: RequestInit = {}) {
+// Axios client (default export)
+const api = axios.create({ baseURL: API_BASE });
+api.defaults.headers.common['X-Tenant-Id'] = TENANT_ID;
+export default api;
+
+// Optional: fetch helper
+export async function apiFetch(path: string, init: RequestInit = {}) {
   const headers = {
     'Content-Type': 'application/json',
     'X-Tenant-Id': TENANT_ID,
     ...(init.headers || {}),
-  };
+  } as Record<string, string>;
 
-  const res = await fetch(`${BASE}${path}`, { ...init, headers });
-
-  // Try to decode JSON, fall back to text
+  const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
   const ct = res.headers.get('content-type') || '';
   const body = ct.includes('application/json') ? await res.json() : await res.text();
-
-  if (!res.ok) {
-    const msg = typeof body === 'string' ? body : JSON.stringify(body);
-    throw new Error(msg || `Request failed: ${res.status}`);
-  }
+  if (!res.ok) throw new Error(typeof body === 'string' ? body : JSON.stringify(body));
   return body;
 }

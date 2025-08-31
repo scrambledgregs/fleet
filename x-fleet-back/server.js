@@ -12,6 +12,8 @@
 // =============================================================================
 
 import 'dotenv/config';
+import fs from 'fs';
+import path from 'path';
 
 // ── Core & HTTP ───────────────────────────────────────────────────────────────
 import express from 'express';
@@ -109,6 +111,26 @@ import {
   removeTenantPhone,
   listTenantPhoneMap,
 } from './lib/repos/tenants.ts';
+
+const REPS_FILE = path.join(process.cwd(), 'data', 'reps.json');
+fs.mkdirSync(path.dirname(REPS_FILE), { recursive: true });
+
+function loadStore() {
+  try { return JSON.parse(fs.readFileSync(REPS_FILE, 'utf8')); }
+  catch { return {}; } // { [tenantId]: [{id, name, defaultCommissionPct}] }
+}
+function saveStore(store) {
+  fs.writeFileSync(REPS_FILE, JSON.stringify(store, null, 2));
+}
+
+let STORE = loadStore();
+function getTenantReps(tenantId) {
+  return STORE[tenantId] || [];
+}
+function setTenantReps(tenantId, reps) {
+  STORE[tenantId] = reps;
+  saveStore(STORE);
+}
 
 // =============================================================================
 // WebSocket (Twilio Media Streams)
@@ -410,55 +432,60 @@ app.post('/api/customer-reps', (req, res) => {
   res.json({ ok: true, saved: { customerId, repId } });
 });
 
-// GET /api/reps -> Rep[]
+// List reps
 app.get('/api/reps', (req, res) => {
-  res.json(repsBag(req.tenantId));
+  const tenant = (req.tenantId || req.header('X-Tenant-Id') || req.query.clientId || 'default').trim();
+  const reps = getTenantReps(tenant);
+  // match frontend shape
+  res.json(reps.map(r => ({
+    id: r.id,
+    name: r.name,
+    defaultCommissionPct: Number(r.defaultCommissionPct || 0), // fraction (0.15)
+  })));
+});
+
+// Create a rep
+app.post('/api/reps', (req, res) => {
+  const tenant =
+    (req.tenantId || req.header('X-Tenant-Id') || req.body?.tenantId || req.query.clientId || 'default').trim();
+  const rawName = (req.body?.name || '').trim();
+  let pct = Number(req.body?.defaultCommissionPct ?? 0);
+  if (!rawName) return res.status(400).json({ ok: false, error: 'name required' });
+
+  // Accept 15 or 0.15
+  if (!Number.isFinite(pct)) pct = 0;
+  if (pct > 1) pct = pct / 100;
+  pct = Math.max(0, Math.min(1, pct));
+
+  const reps = getTenantReps(tenant);
+  const rep = {
+    id: `rep_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+    name: rawName,
+    defaultCommissionPct: pct,
+  };
+  reps.push(rep);
+  setTenantReps(tenant, reps);
+
+  res.json({ ok: true, id: rep.id });
 });
 
 // GET /api/payments
-// - ?unassigned=1        → only items with no sales_rep_id
-// - ?commissionable=1    → only items >= minUsd (defaults to COMMISSIONABLE_MIN_USD)
-// - ?minUsd=500          → override threshold (dollars)
-// - ?paged=1&page=1&pageSize=50 → paged response; otherwise returns a plain array
 app.get('/api/payments', (req, res) => {
   const bag = paymentsBag(req.tenantId);
 
-  const flag = (v) => String(v || '') === '1';
-  const paged = flag(req.query.paged);
-  const unassigned = flag(req.query.unassigned);
-
-  const enforceMinOnUnassigned =
-    String(process.env.ENFORCE_MIN_ON_UNASSIGNED || '').toLowerCase() === 'true';
-
-  const wantCommissionable =
-    flag(req.query.commissionable) || (enforceMinOnUnassigned && unassigned);
-
-  const minUsdParam = Number(req.query.minUsd);
-  const effectiveMinUsd = Number.isFinite(minUsdParam)
-    ? minUsdParam
-    : COMMISSIONABLE_MIN_USD;
+  const paged = String(req.query.paged || '') === '1';
+  const unassigned = String(req.query.unassigned || '') === '1';
+  const includeRep = String(req.query.includeRep || '') === '1'; // <- add this
 
   let list = Array.from(bag.values());
+  if (unassigned) list = list.filter((p) => !p.sales_rep_id);
 
-  // 1) Unassigned filter
-  if (unassigned) {
-    list = list.filter((p) => p.sales_rep_id == null || String(p.sales_rep_id).trim() === '');
-  }
-
-  // 2) Commissionable filter (>= dollars)
-  if (wantCommissionable) {
-    list = list.filter((p) => {
-      const cents = Number(p?.net ?? p?.amount ?? 0);
-      const dollars = cents / 100;
-      return Number.isFinite(dollars) && dollars >= effectiveMinUsd;
-    });
-  }
-
-  // 3) Sort newest first
   list.sort((a, b) => new Date(b.paid_at) - new Date(a.paid_at));
 
-  // 4) Hide internal field in response
-  const rows = list.map(({ sales_rep_id, ...p }) => p);
+  // keep or strip the rep field depending on query
+  const rows = list.map(({ sales_rep_id, ...p }) =>
+    includeRep ? { ...p, sales_rep_id: sales_rep_id || null } : p
+  );
 
   if (!paged) return res.json(rows);
 
@@ -467,7 +494,6 @@ app.get('/api/payments', (req, res) => {
   const total = rows.length;
   const start = (page - 1) * pageSize;
   const items = rows.slice(start, start + pageSize);
-
   return res.json({ ok: true, page, pageSize, total, items });
 });
 
@@ -527,7 +553,7 @@ if (range === 'mtd' || range === 'this-month') {
 }
 
   const bag = paymentsBag(tenantId);
-  const reps = repsBag(tenantId);
+  const reps = getTenantReps(tenantId);
 
   const nameById = new Map(reps.map((r) => [r.id, r.name]));
   const pctById = new Map(reps.map((r) => [r.id, Number(r.defaultCommissionPct) || 0]));
@@ -794,7 +820,7 @@ app.get('/api/commissions/payouts', (req, res) => {
 
 app.get('/api/commissions/payouts/monthly', (req, res) => {
   const tenantId = (req.query?.tenantId || req.tenantId || 'default').toLowerCase();
-  const reps = repsBag(tenantId) || [];
+  const reps = getTenantReps(tenantId) || [];
   const nameById = new Map(reps.map((r) => [r.id, r.name]));
   const list = payoutsByTenant.get(tenantId) || [];
 
@@ -856,7 +882,7 @@ app.get('/api/commissions/monthly', (req, res) => {
 
     // Data bags
     const bag = paymentsBag(tenantId);
-    const reps = repsBag(tenantId) || [];
+    const reps = getTenantReps(tenantId) || [];
     const nameById = new Map(reps.map(r => [r.id, r.name]));
     const pctById  = new Map(reps.map(r => [r.id, Number(r.defaultCommissionPct) || 0]));
 

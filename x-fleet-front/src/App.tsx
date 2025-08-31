@@ -1,55 +1,62 @@
-import { useState, type ReactNode } from 'react'
-import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom'
-import AppShell from './layout/AppShell.jsx'
+import { useState, type ReactNode } from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import AppShell from './layout/AppShell.jsx';
 
 // Pages
-import Dashboard from './pages/Dashboard'
-import DashboardContent from './pages/DashboardContent.jsx'
-import ContactsPage from './pages/Contacts'
-import VehiclesPage from './pages/Vehicles.jsx'
-import Calendar from './pages/Calendar'
-import Affiliate from './pages/Affiliate.jsx'
-import IndustryPacks from './pages/IndustryPacks.jsx'
-import Estimator from './pages/Estimator'
-import RoofMeasure from './pages/RoofMeasure'
-import Invoices from './pages/Invoices'
-import Chatter from './pages/Chatter'
-import EventsPage from './pages/EventsPage'
-import Settings from './pages/Settings'
-import Onboarding from './pages/Onboarding.jsx'
-import Signup from './pages/Signup.jsx'
-import AutomationsPage from './pages/Automations'
-import PhonePage from './pages/PhonePage'
-import RequestAppointment from './pages/RequestAppointment.jsx'
-import VoiceHUD from './components/VoiceHUD'
-import AIHub from './pages/AIHub'
-import JobBoard from './pages/JobBoard'
-import LeadHub from './pages/LeadHub'
-import PricingPage from './pages/PricingPage'
-import SalesTracker from "./pages/SalesTracker"
-import "../src/lib/http";
+import Dashboard from './pages/Dashboard';
+import DashboardContent from './pages/DashboardContent.jsx';
+import ContactsPage from './pages/Contacts';
+import VehiclesPage from './pages/Vehicles.jsx';
+import Calendar from './pages/Calendar';
+import Affiliate from './pages/Affiliate.jsx';
+import IndustryPacks from './pages/IndustryPacks.jsx';
+import Estimator from './pages/Estimator';
+import RoofMeasure from './pages/RoofMeasure';
+import Invoices from './pages/Invoices';
+import Chatter from './pages/Chatter';
+import EventsPage from './pages/EventsPage';
+import Settings from './pages/Settings';
+import Onboarding from './pages/Onboarding.jsx';
+import Signup from './pages/Signup.jsx';
+import AutomationsPage from './pages/Automations';
+import PhonePage from './pages/PhonePage';
+import RequestAppointment from './pages/RequestAppointment.jsx';
+import VoiceHUD from './components/VoiceHUD';
+import AIHub from './pages/AIHub';
+import JobBoard from './pages/JobBoard';
+import LeadHub from './pages/LeadHub';
+import PricingPage from './pages/PricingPage';
+
+// Sales (nested under /sales)
+import SalesHub from './pages/sales/SalesHub';
+import UnassignedPaymentsPage from './pages/sales/UnassignedPaymentsPage';
+import SalesTracker from './pages/sales/SalesTracker';
+import CashLog from './pages/sales/CashLog';
+import Leaderboard from './pages/sales/Leaderboard';
+
+import '../src/lib/http';
 
 // import without extension so it resolves FloatingCTA.tsx
-import FloatingCTA from './components/FloatingCTA'
+import FloatingCTA from './components/FloatingCTA';
 
 // Team hub
-import Team from './pages/Team'
-import TeamFeed from './pages/TeamFeed'
+import Team from './pages/Team';
+import TeamFeed from './pages/TeamFeed';
 
 function RequireSetup({ children }: { children: ReactNode }) {
-  return <>{children}</>
+  return <>{children}</>;
 }
 
 function RouteAwareHUD() {
-  const { pathname } = useLocation()
+  const { pathname } = useLocation();
   // Hide the floating HUD anywhere under /phones
-  if (pathname.startsWith('/phones')) return null
-  return <VoiceHUD />
+  if (pathname.startsWith('/phones')) return null;
+  return <VoiceHUD />;
 }
 
 export default function App() {
-  const [mode, setMode] = useState<'Approve' | 'Auto'>('Approve')
-  const [compact, setCompact] = useState(false)
+  const [mode, setMode] = useState<'Approve' | 'Auto'>('Approve');
+  const [compact, setCompact] = useState(false);
 
   return (
     <Router>
@@ -86,7 +93,19 @@ export default function App() {
 
           {/* Other */}
           <Route path="vehicles" element={<VehiclesPage />} />
-          <Route path="/sales" element={<SalesTracker />} />
+
+          {/* -------- Sales (nested) -------- */}
+          <Route path="sales" element={<SalesHub />}>
+            {/* Default to the running cash log */}
+            <Route index element={<Navigate to="cash" replace />} />
+            <Route path="cash" element={<CashLog />} />                {/* all cash collected */}
+            <Route path="unassigned" element={<UnassignedPaymentsPage />} /> {/* assign queue */}
+            <Route path="reps" element={<Leaderboard />} />            {/* by-rep leaderboard */}
+            <Route path="commissions" element={<Leaderboard />} />     {/* legacy alias */}
+            <Route path="tracker" element={<SalesTracker />} />
+          </Route>
+          {/* -------------------------------- */}
+
           <Route path="leads" element={<LeadHub />} />
           <Route path="calendar" element={<Calendar />} />
           <Route path="ai" element={<AIHub />} />
@@ -122,5 +141,5 @@ export default function App() {
       <RouteAwareHUD />
       <FloatingCTA />
     </Router>
-  )
+  );
 }
